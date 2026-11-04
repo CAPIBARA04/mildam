@@ -349,7 +349,7 @@ function viewHome() {
 }
 
 /* ===================== 플레이어 ===================== */
-let pid = null, P = {view: null, inChat: null, w60seen: {}, answered: {}, notices: null, reqSeen: {}, pick: new Set(), wasMember: false, viewLog: null};
+let pid = null, P = {view: null, inChat: null, w60seen: {}, answered: {}, qRead: {}, notices: null, reqSeen: {}, pick: new Set(), wasMember: false, viewLog: null};
 
 function viewJoin(meta) {
   $("#app").innerHTML = `
@@ -509,11 +509,8 @@ function paintLobby() {
   $("#reqBtn").disabled = !meta.open || pendingMine || !!me.busy;
   $("#pOpenTxt").textContent = !meta.open ? "지금은 밀담 시간이 아니에요. GM이 열면 요청할 수 있어요." : `한 번에 ${durTxt(meta.duration || 180)} 동안 2~3명이 비밀로 대화해요. 끝나면 자동으로 나와요.`;
   // 질문
-  const qs = entries(R.questions).filter(([, q]) => q.from === pid).sort((a, b) => (b[1].at || 0) - (a[1].at || 0));
-  for (const [k, q] of qs) if (q.answer && !P.answered[k]) { if (P.answered.__init) { chime("alert"); toast("GM이 질문에 답했어요."); } P.answered[k] = 1; }
-  P.answered.__init = 1;
-  $("#pQs").innerHTML = qs.map(([, q]) => `<div class="q"><div class="small muted">${hhmm(q.at)} 내 질문</div>${esc(q.text)}
-    <hr class="seam">${q.answer ? `<div><span class="chip gm">GM 답변</span> ${esc(q.answer)}</div>` : `<div class="muted small">답변을 기다리는 중</div>`}</div>`).join("");
+  const qs = myQs(); qs.forEach(([k, q]) => { if (q.answer) P.qRead[k] = 1; });
+  $("#pQs").innerHTML = qHTML(qs);
   // 참가자
   $("#pPlayers").innerHTML = entries(R.players).map(([k, p]) => `<li><span class="grow"><span class="who">${esc(p.name)}</span>${k === pid ? ` <span class="chip">나</span>` : ""}</span>
     ${p.busy ? `<span class="tally on"><i></i>밀담 중</span>` : R.online?.[k] === false ? `<span class="tally off"><i></i>연결 끊김</span>` : `<span class="tally idle"><i></i>대기</span>`}</li>`).join("");
@@ -523,6 +520,40 @@ function paintLobby() {
      <span>${membersOf(c).filter(x => x !== pid).map(nameOf).map(esc).join(", ")}</span><span class="muted small">${hhmm(c.startAt)}</span></button>`).join("") : `<p class="muted small">끝난 밀담의 대화는 여기서 다시 볼 수 있어요.</p>`;
   $("#pLogs").onclick = e => { const b = e.target.closest("[data-log]"); if (b) openLog(b.dataset.log, pid); };
   if ($("#pickList")) paintPick();
+  paintMyQs();
+}
+
+/* GM 질문·답변: 로비와 밀담 중 모두에서 확인 */
+function myQs() { return entries(R?.questions).filter(([, q]) => q.from === pid).sort((a, b) => (b[1].at || 0) - (a[1].at || 0)); }
+function qHTML(qs) {
+  return qs.map(([, q]) => `<div class="q"><div class="small muted">${hhmm(q.at)} 내 질문</div>${esc(q.text)}
+    <hr class="seam">${q.answer ? `<div><span class="chip gm">GM 답변</span> ${esc(q.answer)}</div>` : `<div class="muted small">답변을 기다리는 중</div>`}</div>`).join("");
+}
+function checkAnswers() {
+  for (const [k, q] of myQs()) if (q.answer && !P.answered[k]) {
+    if (P.answered.__init) { chime("alert"); toast("💬 GM 답변: " + q.answer, false, 8000); }
+    P.answered[k] = 1;
+  }
+  P.answered.__init = 1;
+}
+function openMyQs() {
+  openSheet(`<div class="row" style="justify-content:space-between"><h2>내 질문</h2><button class="btn sm ghost" id="mqClose">닫기</button></div>
+    <p class="muted small">GM에게만 보이는 질문과 답변이에요.</p><div id="mqList" style="max-height:58dvh;overflow:auto"></div>
+    <button class="btn block" id="mqAsk" style="margin-top:12px">새 질문하기</button>`);
+  $("#mqClose").onclick = closeSheet; $("#mqAsk").onclick = () => openAsk();
+  paintMyQs();
+}
+function paintMyQs() {
+  const box = $("#mqList"); if (!box) return;
+  const qs = myQs(); qs.forEach(([k, q]) => { if (q.answer) P.qRead[k] = 1; });
+  const html = qs.length ? qHTML(qs) : `<p class="muted">아직 보낸 질문이 없어요.</p>`;
+  if (box._h !== html) { box._h = html; box.innerHTML = html; }
+  updQBadge();
+}
+function updQBadge() {
+  const bd = $("#qBadge"); if (!bd) return;
+  const unread = myQs().filter(([k, q]) => q.answer && !P.qRead[k]).length;
+  bd.hidden = !unread; bd.textContent = unread;
 }
 
 function openLog(cid, me) {
@@ -537,7 +568,7 @@ function shellChat(cid) {
   $("#app").innerHTML = `
   <div class="room">
     <div class="door foam">
-      <div class="top"><span class="sign"><i></i>방음 중</span><button class="btn sm ghost" id="askIn">GM에게 질문</button></div>
+      <div class="top"><span class="sign"><i></i>방음 중</span><span class="row"><button class="btn sm ghost" id="myQ" style="position:relative">내 질문<span class="badge" id="qBadge" hidden></span></button><button class="btn sm ghost" id="askIn">GM에게 질문</button></span></div>
       <div class="clock num" id="clock" aria-live="polite">0:00</div>
       <div class="members" id="mem"></div>
     </div>
@@ -546,11 +577,13 @@ function shellChat(cid) {
   </div>`;
   $("#cmp").onsubmit = async e => { e.preventDefault(); const t = $("#cIn").value.trim(); if (!t) return; $("#cIn").value = ""; await S.push(`${roomPath()}/messages/${cid}`, {from: pid, text: t, at: S.TS}); };
   $("#askIn").onclick = () => openAsk();
+  $("#myQ").onclick = () => openMyQs();
 }
 function paintChat(cid) {
   const c = R.chats[cid];
   $("#mem").textContent = membersOf(c).map(nameOf).join(" · ") + " · GM이 들을 수 있어요";
   paintMsgs($("#msgs"), cid, pid);
+  paintMyQs(); updQBadge();
   if (c.w60 && c.duration > 60 && !P.w60seen[cid]) { P.w60seen[cid] = 1; chime("alert"); toast("⏰ 1분 남았습니다", true); }
 }
 
@@ -562,6 +595,7 @@ function renderPlayer() {
     return;
   }
   P.wasMember = true;
+  checkAnswers();
   const my = liveChats().find(([, c]) => c.members?.[pid]);
   if (my) {
     const [cid] = my;
