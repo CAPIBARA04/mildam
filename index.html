@@ -156,6 +156,22 @@ label.f{display:block;font-size:13px;color:var(--dim);margin:12px 0 6px}
 .seg{display:flex;flex-wrap:wrap;gap:6px}
 .seg button{min-height:42px;padding:6px 12px;border-radius:var(--r-md);border:1px solid var(--seam);background:transparent;cursor:pointer;font-weight:700}
 .seg button.on{border-color:var(--lamp);color:var(--lamp);background:rgba(233,168,58,.08)}
+/* 추리노트 */
+.note-tabs{display:flex;gap:6px;margin:10px 0}
+.note-tabs button{flex:1;min-height:42px;border-radius:var(--r-md);border:1px solid var(--seam);background:transparent;font-weight:700;cursor:pointer}
+.note-tabs button.on{border-color:var(--lamp);color:var(--lamp);background:rgba(233,168,58,.08)}
+.note textarea{font-size:16px;line-height:1.6;background:#15171A}
+.note .free{min-height:46dvh}
+.suspect{border:1px solid var(--seam);border-radius:var(--r-md);padding:12px;margin:10px 0;background:#1E2024}
+.suspect.s3{border-color:var(--tally)} .suspect.s2{border-color:var(--lamp)}
+.suspect textarea{min-height:52px}
+.sus{display:flex;gap:4px;margin:8px 0}
+.sus button{flex:1;min-height:36px;border-radius:8px;border:1px solid var(--seam);background:transparent;font-size:13px;font-weight:700;cursor:pointer}
+.sus button.on.l0{border-color:var(--steel);color:var(--paper)}
+.sus button.on.l1{border-color:var(--ok);color:var(--ok)}
+.sus button.on.l2{border-color:var(--lamp);color:var(--lamp)}
+.sus button.on.l3{border-color:var(--tally);color:#F2A49E;background:rgba(216,66,58,.1)}
+.saved{font-size:12px;color:var(--dim);min-height:18px}
 .switch{display:flex;justify-content:space-between;align-items:center;gap:12px}
 .switch button{min-width:92px}
 hr.seam{border:0;border-top:1px solid var(--seam);margin:14px 0}
@@ -389,6 +405,11 @@ function shellLobby() {
       <div id="pOut"></div>
     </section>
     <section class="panel">
+      <h2>추리노트</h2>
+      <p class="muted small">내 폰에만 저장되는 개인 노트예요. GM도 볼 수 없어요.</p>
+      <button class="btn block" id="noteBtn">📝 추리노트 열기</button>
+    </section>
+    <section class="panel">
       <h2>GM에게 질문</h2>
       <p class="muted small">룰이 헷갈리면 다른 사람 몰래 GM에게 물어보세요.</p>
       <button class="btn block" id="askBtn">GM에게 질문하기</button>
@@ -405,6 +426,7 @@ function shellLobby() {
   </div>`;
   $("#reqBtn").onclick = openRequestSheet;
   $("#askBtn").onclick = () => openAsk();
+  $("#noteBtn").onclick = () => openNote();
 }
 
 function openAsk() {
@@ -556,6 +578,59 @@ function updQBadge() {
   bd.hidden = !unread; bd.textContent = unread;
 }
 
+/* 추리노트: 이 기기 브라우저에만 저장 (서버로 보내지 않음) */
+const noteKey = () => `mildam_note_${code}_${pid}`;
+function loadNote() { try { return JSON.parse(localStorage.getItem(noteKey()) || "{}"); } catch { return {}; } }
+let noteTimer = null;
+function saveNote(n) {
+  clearTimeout(noteTimer);
+  const st = $("#noteSaved"); if (st) st.textContent = "저장 중…";
+  noteTimer = setTimeout(() => {
+    try { localStorage.setItem(noteKey(), JSON.stringify(n)); if ($("#noteSaved")) $("#noteSaved").textContent = "이 폰에 저장됨 · " + hhmm(Date.now()); }
+    catch { if ($("#noteSaved")) $("#noteSaved").textContent = "저장하지 못했어요 (브라우저 저장공간을 확인해 주세요)"; }
+  }, 400);
+}
+const SUS = ["모름", "낮음", "중간", "높음"];
+function openNote(tab) {
+  const n = loadNote(); n.people ||= {}; let cur = tab || n.tab || "free";
+  openSheet(`<div class="note">
+    <div class="row" style="justify-content:space-between"><h2>📝 추리노트</h2><button class="btn sm ghost" id="noteClose">닫기</button></div>
+    <div class="note-tabs" role="tablist"><button data-tab="free">자유 메모</button><button data-tab="people">인물별</button></div>
+    <div id="noteBody"></div>
+    <div class="saved" id="noteSaved">내 폰에만 저장돼요. GM도 볼 수 없어요.</div></div>`);
+  $("#noteClose").onclick = closeSheet;
+  const tabs = $(".note-tabs");
+  const show = t => {
+    cur = t; n.tab = t; saveNote(n);
+    [...tabs.children].forEach(b => { b.classList.toggle("on", b.dataset.tab === t); b.setAttribute("aria-selected", b.dataset.tab === t); });
+    const body = $("#noteBody");
+    if (t === "free") {
+      body.innerHTML = `<textarea class="free" id="noteFree" placeholder="들은 이야기, 수상한 점, 시간 순서… 자유롭게 적어보세요."></textarea>`;
+      const ta = $("#noteFree"); ta.value = n.free || "";
+      ta.oninput = () => { n.free = ta.value; saveNote(n); };
+    } else {
+      const others = entries(R?.players).filter(([k]) => k !== pid);
+      body.innerHTML = others.length ? others.map(([k, p]) => {
+        const v = n.people[k] || {}; const s = v.sus || 0;
+        return `<div class="suspect s${s}" data-p="${k}">
+          <div class="row" style="justify-content:space-between"><span class="who">${esc(p.name)}</span><span class="small muted">의심도</span></div>
+          <div class="sus">${SUS.map((l, i) => `<button class="l${i} ${i === s ? "on" : ""}" data-sus="${i}">${l}</button>`).join("")}</div>
+          <label class="f" style="margin-top:4px">알리바이 · 주장</label><textarea data-f="alibi" placeholder="예: 9시에 신사에 있었다고 함">${esc(v.alibi || "")}</textarea>
+          <label class="f">메모</label><textarea data-f="memo" placeholder="수상한 점, 확인할 것">${esc(v.memo || "")}</textarea></div>`;
+      }).join("") : `<p class="muted">다른 참가자가 들어오면 여기에 인물별 칸이 생겨요.</p>`;
+      body.oninput = e => { const ta = e.target.closest("textarea[data-f]"); if (!ta) return; const k = ta.closest("[data-p]").dataset.p; (n.people[k] ||= {})[ta.dataset.f] = ta.value; saveNote(n); };
+      body.onclick = e => {
+        const b = e.target.closest("[data-sus]"); if (!b) return;
+        const card = b.closest("[data-p]"); const k = card.dataset.p; const lv = +b.dataset.sus;
+        (n.people[k] ||= {}).sus = lv; saveNote(n);
+        card.className = `suspect s${lv}`; [...b.parentNode.children].forEach(x => x.classList.toggle("on", x === b));
+      };
+    }
+  };
+  tabs.onclick = e => { const b = e.target.closest("[data-tab]"); if (b) show(b.dataset.tab); };
+  show(cur);
+}
+
 function openLog(cid, me) {
   const c = R.chats[cid];
   openSheet(`<div class="row" style="justify-content:space-between"><h2>밀담 기록</h2><button class="btn sm ghost" id="lgClose">닫기</button></div>
@@ -568,7 +643,7 @@ function shellChat(cid) {
   $("#app").innerHTML = `
   <div class="room">
     <div class="door foam">
-      <div class="top"><span class="sign"><i></i>방음 중</span><span class="row"><button class="btn sm ghost" id="myQ" style="position:relative">내 질문<span class="badge" id="qBadge" hidden></span></button><button class="btn sm ghost" id="askIn">GM에게 질문</button></span></div>
+      <div class="top"><span class="sign"><i></i>방음 중</span><span class="row" style="gap:6px"><button class="btn sm ghost" id="noteIn" aria-label="추리노트">📝 노트</button><button class="btn sm ghost" id="myQ" style="position:relative">내 질문<span class="badge" id="qBadge" hidden></span></button><button class="btn sm ghost" id="askIn">질문하기</button></span></div>
       <div class="clock num" id="clock" aria-live="polite">0:00</div>
       <div class="members" id="mem"></div>
     </div>
@@ -578,6 +653,7 @@ function shellChat(cid) {
   $("#cmp").onsubmit = async e => { e.preventDefault(); const t = $("#cIn").value.trim(); if (!t) return; $("#cIn").value = ""; await S.push(`${roomPath()}/messages/${cid}`, {from: pid, text: t, at: S.TS}); };
   $("#askIn").onclick = () => openAsk();
   $("#myQ").onclick = () => openMyQs();
+  $("#noteIn").onclick = () => openNote();
 }
 function paintChat(cid) {
   const c = R.chats[cid];
