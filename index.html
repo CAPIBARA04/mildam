@@ -299,6 +299,8 @@ const sorted = o => entries(o).sort((a, b) => (a[1].at || 0) - (b[1].at || 0));
 
 async function sysMsg(cid, text, alert = false) { await S.push(`${roomPath()}/messages/${cid}`, {from: "SYS", text, at: S.TS, alert}); }
 
+function maxMem() { const m = R?.meta?.maxMem; return m === 0 ? 99 : (m || 3); }
+function memTxt() { const m = maxMem(); return m >= 99 ? "2명 이상(인원 제한 없음)" : m === 2 ? "2명" : `2~${m}명`; }
 async function endChat(cid, reason) {
   let mem = [];
   const ok = await S.tx(`${roomPath()}/chats/${cid}`, c => { if (!c || c.status !== "live") return undefined; mem = Object.keys(c.members || {}); return {...c, status: "ended", endedAt: now(), endReason: reason}; });
@@ -440,13 +442,14 @@ function openAsk() {
 
 function openRequestSheet() {
   P.pick = new Set();
-  openSheet(`<h2>누구와 밀담할까요?</h2><p class="muted small">1~2명을 고르세요. 상대가 모두 수락하면 밀담방이 열려요.</p><div id="pickList"></div>
+  const lim = maxMem() - 1;
+  openSheet(`<h2>누구와 밀담할까요?</h2><p class="muted small">${lim >= 98 ? "함께할 사람을 원하는 만큼" : lim === 1 ? "1명을" : `1~${lim}명을`} 고르세요. 상대가 모두 수락하면 밀담방이 열려요.</p><div id="pickList"></div>
     <div class="row" style="margin-top:12px"><button class="btn ghost grow" id="rCancel">취소</button><button class="btn primary grow" id="rSend" disabled>요청 보내기</button></div>`);
   paintPick();
   $("#rCancel").onclick = closeSheet;
   $("#pickList").onclick = e => {
     const el = e.target.closest(".pick"); if (!el || el.classList.contains("busy")) return;
-    const id = el.dataset.id; if (P.pick.has(id)) P.pick.delete(id); else if (P.pick.size < 2) P.pick.add(id); else toast("최대 2명까지 고를 수 있어요.");
+    const id = el.dataset.id; if (P.pick.has(id)) P.pick.delete(id); else if (P.pick.size < maxMem() - 1) P.pick.add(id); else toast(`나를 포함해 최대 ${maxMem()}명까지예요.`);
     paintPick();
   };
   $("#rSend").onclick = async () => {
@@ -545,7 +548,7 @@ function paintLobby() {
   $("#pOut").onclick = e => { const c = e.target.closest("[data-cancel]"); if (c) S.update(`${roomPath()}/requests/${c.dataset.cancel}`, {status: "cancelled"}); };
   const pendingMine = mine && mine[1].status === "pending";
   $("#reqBtn").disabled = !meta.open || pendingMine || !!me.busy;
-  $("#pOpenTxt").textContent = !meta.open ? "지금은 밀담 시간이 아니에요. GM이 열면 요청할 수 있어요." : `한 번에 ${durTxt(meta.duration || 180)} 동안 2~3명이 비밀로 대화해요. 끝나면 자동으로 나와요.`;
+  $("#pOpenTxt").textContent = !meta.open ? "지금은 밀담 시간이 아니에요. GM이 열면 요청할 수 있어요." : `한 번에 ${durTxt(meta.duration || 180)} 동안 ${memTxt()}이 비밀로 대화해요. 끝나면 자동으로 나와요.`;
   // 질문
   const qs = myQs(); qs.forEach(([k, q]) => { if (q.answer) P.qRead[k] = 1; });
   $("#pQs").innerHTML = qHTML(qs);
@@ -691,7 +694,7 @@ function renderPlayer() {
   const my = liveChats().find(([, c]) => c.members?.[pid]);
   if (my) {
     const [cid] = my;
-    if (P.view !== "chat:" + cid) { closeSheet(); shellChat(cid); chime(my[1].by === "gm" ? "alert" : "soft"); if (my[1].by === "gm") toast("🔔 GM이 밀담방으로 불렀어요", true, 4500); }
+    if (P.view !== "chat:" + cid) { closeSheet(); shellChat(cid); const viaGM = my[1].by === "gm" || my[1].added?.[pid]; chime(viaGM ? "alert" : "soft"); if (my[1].added?.[pid]) toast("🔔 GM이 진행 중인 밀담방에 추가했어요", true, 4500); else if (my[1].by === "gm") toast("🔔 GM이 밀담방으로 불렀어요", true, 4500); }
     P.inChat = cid; paintChat(cid);
   } else {
     if (P.inChat) {
@@ -753,13 +756,14 @@ function buildTab() {
     $("#gPlayers").onclick = async e => { const b = e.target.closest("[data-kick]"); if (b && confirm(`${nameOf(b.dataset.kick)} 님을 내보낼까요?`)) await S.remove(`${roomPath()}/players/${b.dataset.kick}`); };
   }
   if (G.tab === "rooms") {
-    body.innerHTML = `<section class="panel"><h2>밀담방 열기</h2><p class="muted small">참가자 2~3명을 골라 바로 밀담방에 넣어요. 수락 없이 들어가고, 시간·알림·자동 퇴장은 똑같이 적용돼요.</p>
+    body.innerHTML = `<section class="panel"><h2>밀담방 열기</h2><p class="muted small">참가자 ${memTxt()}을 골라 바로 밀담방에 넣어요. 수락 없이 들어가고, 시간·알림·자동 퇴장은 똑같이 적용돼요.</p>
         <button class="btn primary block" id="gOpenRoom">참가자 고르기</button></section>
       <section class="panel"><h2>진행 중인 밀담</h2><div id="gLiveList"></div></section>
       <section class="panel"><h2>끝난 밀담</h2><div id="gEnded"></div></section>`;
     body.onclick = async e => {
       const v = e.target.closest("[data-view]"), x = e.target.closest("[data-ext]"), s = e.target.closest("[data-stop]");
       if (e.target.closest("#gOpenRoom")) return openGMPick();
+      const ad = e.target.closest("[data-add]"); if (ad) return openGMChat(ad.dataset.add, true);
       if (v) openGMChat(v.dataset.view);
       if (x) { const cid = x.dataset.ext; await S.tx(`${roomPath()}/chats/${cid}`, c => c && c.status === "live" ? {...c, endAt: c.endAt + 60000, w60: (c.endAt + 60000 - now()) <= 60000, w10: false} : undefined); sysMsg(cid, "GM이 시간을 1분 연장했어요."); }
       if (s && confirm("이 밀담을 지금 끝낼까요?")) endChat(s.dataset.stop, "gm");
@@ -780,6 +784,8 @@ function buildTab() {
     </section>
     <section class="panel"><h2>밀담 1회 시간</h2><p class="muted small">새로 시작되는 밀담부터 적용돼요. 끝나기 1분 전에 알림이 가고, 시간이 다 되면 자동으로 퇴장해요.</p>
       <div class="seg" id="gDur">${[[30, "30초"], [60, "1분"], [120, "2분"], [180, "3분"], [300, "5분"], [420, "7분"], [600, "10분"]].map(([s, l]) => `<button data-s="${s}">${l}</button>`).join("")}</div></section>
+    <section class="panel"><h2>밀담 최대 인원</h2><p class="muted small">한 밀담방에 들어갈 수 있는 최대 인원이에요 (요청한 사람 포함). 진행 중인 방에는 GM이 '인원 추가'로 더 넣을 수 있어요.</p>
+      <div class="seg" id="gMax">${[[2, "2명"], [3, "3명"], [4, "4명"], [5, "5명"], [6, "6명"], [8, "8명"], [0, "제한 없음"]].map(([n, l]) => `<button data-m="${n}">${l}</button>`).join("")}</div></section>
     <section class="panel"><h2>전체 공지</h2><textarea id="nText" maxlength="200" placeholder="예: 10분 뒤 투표를 시작합니다"></textarea>
       <button class="btn primary block" id="nSend" style="margin-top:10px">공지 보내기</button></section>
     <section class="panel"><h2>알림</h2><p class="muted small">폰은 화면을 한 번 눌러야 알림음이 켜져요. 화면이 꺼지면 알림이 오지 않으니 GM 기기는 켜두세요.</p>
@@ -787,6 +793,7 @@ function buildTab() {
     <section class="panel"><h2>게임 끝난 뒤</h2><p class="muted small">방의 모든 대화와 기록을 지워요. 되돌릴 수 없어요.</p><button class="btn danger block" id="del">방 삭제</button></section>`;
     $("#openBtn").onclick = () => S.set(`${roomPath()}/meta/open`, !R.meta.open);
     $("#gDur").onclick = e => { const b = e.target.closest("button"); if (b) S.set(`${roomPath()}/meta/duration`, +b.dataset.s); };
+    $("#gMax").onclick = e => { const b = e.target.closest("button"); if (b) S.set(`${roomPath()}/meta/maxMem`, +b.dataset.m); };
     $("#nSend").onclick = async () => { const t = $("#nText").value.trim(); if (!t) return; await S.push(`${roomPath()}/notices`, {text: t, at: S.TS}); $("#nText").value = ""; toast("공지를 보냈어요."); };
     $("#testSnd").onclick = () => { unlockAudio(); chime("alert"); };
     $("#wake").onclick = async () => { try { await navigator.wakeLock.request("screen"); toast("화면이 꺼지지 않게 했어요."); } catch { toast("이 기기는 화면 켜두기를 지원하지 않아요.", true); } };
@@ -798,17 +805,17 @@ function copy(t, msg) { (navigator.clipboard?.writeText(t) || Promise.reject()).
 
 function openGMPick() {
   G.open = null; G.pick = new Set();
-  openSheet(`<h2>누구를 밀담방에 넣을까요?</h2><p class="muted small">2~3명을 고르세요 · 1회 시간 <b id="gpDur"></b> (설정 탭에서 바꿔요)</p><div id="gPickList"></div>
+  openSheet(`<h2>누구를 밀담방에 넣을까요?</h2><p class="muted small">${memTxt()}을 고르세요 (설정 탭에서 바꿔요) · 1회 시간 <b id="gpDur"></b> (설정 탭에서 바꿔요)</p><div id="gPickList"></div>
     <div class="row" style="margin-top:12px"><button class="btn ghost grow" id="gpCancel">취소</button><button class="btn primary grow" id="gpGo" disabled>방 열기</button></div>`);
   paintGMPick();
   $("#gpCancel").onclick = closeSheet;
   $("#gPickList").onclick = e => {
     const el = e.target.closest(".pick"); if (!el || el.classList.contains("busy")) return;
-    const id = el.dataset.id; if (G.pick.has(id)) G.pick.delete(id); else if (G.pick.size < 3) G.pick.add(id); else toast("최대 3명까지 고를 수 있어요.");
+    const id = el.dataset.id; if (G.pick.has(id)) G.pick.delete(id); else if (G.pick.size < maxMem()) G.pick.add(id); else toast(`최대 ${maxMem()}명까지 고를 수 있어요. 설정 탭에서 늘릴 수 있어요.`);
     paintGMPick();
   };
   $("#gpGo").onclick = async () => {
-    if (G.pick.size < 2 || G.pick.size > 3) return;
+    if (G.pick.size < 2 || G.pick.size > maxMem()) return;
     $("#gpGo").disabled = true;
     const names = [...G.pick].map(nameOf).join(", ");
     if (await gmStartChat([...G.pick])) { closeSheet(); toast(`${names} 님을 밀담방에 넣었어요.`); }
@@ -830,12 +837,58 @@ function paintGMPick() {
   go.disabled = n < 2; go.textContent = n ? `방 열기 (${n}명)` : "방 열기";
 }
 
-function openGMChat(cid) {
-  G.open = cid;
+async function gmAddToChat(cid, ids) {
+  const players = await S.get(`${roomPath()}/players`) || {};
+  const bad = ids.filter(x => !players[x] || players[x].busy);
+  if (bad.length) { toast(`${bad.map(nameOf).join(", ")} 님은 지금 넣을 수 없어요 (밀담 중이거나 방을 나감).`, true); return false; }
+  const ok = await S.tx(`${roomPath()}/chats/${cid}`, c => {
+    if (!c || c.status !== "live") return undefined;
+    const members = {...c.members}, added = {...(c.added || {})};
+    ids.forEach(x => { members[x] = true; added[x] = true; });
+    return {...c, members, added};
+  });
+  if (!ok) { toast("이미 끝난 밀담이에요.", true); return false; }
+  const up = {}; ids.forEach(x => up[`players/${x}/busy`] = cid);
+  await S.update(roomPath(), up);
+  await sysMsg(cid, `GM이 ${ids.map(nameOf).join(", ")} 님을 밀담에 추가했어요.`);
+  return true;
+}
+function paintGMAdd() {
+  const box = $("#gcAddList"); if (!box || !G.addPick || $("#gcAddBox").hidden) return;
+  const c = R.chats?.[G.open];
+  const cand = entries(R.players).filter(([k]) => !c?.members?.[k]);
+  for (const id of [...G.addPick]) if (!R.players?.[id] || R.players[id].busy) G.addPick.delete(id);
+  box.innerHTML = cand.length ? cand.map(([k, p]) => {
+    const busy = !!p.busy; const sel = G.addPick.has(k);
+    return `<div class="pick ${sel ? "sel" : ""} ${busy ? "busy" : ""}" data-id="${k}" role="checkbox" aria-checked="${sel}" tabindex="0">
+      <input type="checkbox" ${sel ? "checked" : ""} ${busy ? "disabled" : ""} tabindex="-1"><span class="grow who">${esc(p.name)}</span>
+      ${busy ? `<span class="chip red">다른 밀담 중</span>` : R.online?.[k] === false ? `<span class="chip">연결 끊김</span>` : ""}</div>`;
+  }).join("") : `<p class="muted small">더 넣을 수 있는 참가자가 없어요.</p>`;
+  const n = G.addPick.size, go = $("#gcAddGo");
+  go.disabled = !n; go.textContent = n ? `${n}명 추가` : "추가";
+}
+function openGMChat(cid, addMode) {
+  G.open = cid; G.addPick = new Set();
   openSheet(`<div class="row" style="justify-content:space-between"><div><h2 id="gcTitle"></h2><div class="muted small" id="gcSub"></div></div><button class="btn sm ghost" id="gcClose">닫기</button></div>
+    <div id="gcAddBar" class="row" style="margin-top:8px"><button class="btn sm grow" id="gcAddBtn">＋ 인원 추가</button></div>
+    <div id="gcAddBox" hidden><p class="muted small" style="margin:8px 0 0">진행 중인 이 밀담에 넣을 사람을 고르세요. 남은 시간은 그대로예요.</p><div id="gcAddList"></div>
+      <div class="row" style="margin-top:8px"><button class="btn ghost grow" id="gcAddCancel">취소</button><button class="btn primary grow" id="gcAddGo" disabled>추가</button></div></div>
     <div id="gcMsgs" class="msgs" style="max-height:55dvh;padding:8px 0"></div>
     <form class="row" id="gcForm" autocomplete="off"><input type="text" id="gcIn" class="grow" maxlength="500" placeholder="GM으로 말하기"><button class="btn primary">보내기</button></form>`);
   $("#gcClose").onclick = () => { G.open = null; closeSheet(); };
+  const showAdd = on => { $("#gcAddBox").hidden = !on; $("#gcAddBar").hidden = on; G.addPick = new Set(); paintGMAdd(); };
+  $("#gcAddBtn").onclick = () => showAdd(true);
+  $("#gcAddCancel").onclick = () => showAdd(false);
+  $("#gcAddList").onclick = e => {
+    const el = e.target.closest(".pick"); if (!el || el.classList.contains("busy")) return;
+    const id = el.dataset.id; G.addPick.has(id) ? G.addPick.delete(id) : G.addPick.add(id); paintGMAdd();
+  };
+  $("#gcAddGo").onclick = async () => {
+    if (!G.addPick.size) return; $("#gcAddGo").disabled = true;
+    const ids = [...G.addPick];
+    if (await gmAddToChat(cid, ids)) { toast(`${ids.map(nameOf).join(", ")} 님을 추가했어요.`); showAdd(false); } else paintGMAdd();
+  };
+  if (addMode) showAdd(true);
   $("#gcForm").onsubmit = async e => { e.preventDefault(); const t = $("#gcIn").value.trim(); if (!t) return; $("#gcIn").value = ""; await S.push(`${roomPath()}/messages/${cid}`, {from: "GM", text: t, at: S.TS}); };
   paintGMChat();
 }
@@ -845,6 +898,8 @@ function paintGMChat() {
   $("#gcTitle").textContent = membersOf(c).map(nameOf).join(" · ");
   $("#gcSub").textContent = c.status === "live" ? `방음 중 · 남은 시간 ${fmt(c.endAt - now())}` : `끝난 밀담 · ${hhmm(c.startAt)}`;
   $("#gcForm").style.display = c.status === "live" ? "" : "none";
+  if (c.status !== "live") { $("#gcAddBar").hidden = true; $("#gcAddBox").hidden = true; }
+  paintGMAdd();
   paintMsgs($("#gcMsgs"), cid, "GM");
 }
 
@@ -870,7 +925,7 @@ function paintGM() {
       return `<div class="case live"><div class="row" style="justify-content:space-between"><span class="tally on"><i></i>방음 중</span><span class="t num ${rem <= 60000 ? "warn" : ""}" data-clock="${k}">${fmt(rem)}</span></div>
         <div class="who" style="margin:6px 0">${membersOf(c).map(nameOf).map(esc).join(" · ")}</div>
         <div class="muted small" style="min-height:20px">${last ? `${esc(nameOf(last.from))}: ${esc(last.text).slice(0, 60)}` : "아직 대화 없음"}</div>
-        <div class="row" style="margin-top:10px"><button class="btn sm grow" data-view="${k}">듣기 · 말하기</button><button class="btn sm" data-ext="${k}">+1분</button><button class="btn sm danger" data-stop="${k}">종료</button></div></div>`;
+        <div class="row" style="margin-top:10px"><button class="btn sm grow" data-view="${k}">듣기 · 말하기</button><button class="btn sm" data-add="${k}" aria-label="인원 추가">＋사람</button><button class="btn sm" data-ext="${k}">+1분</button><button class="btn sm danger" data-stop="${k}">종료</button></div></div>`;
     }).join("") : `<p class="muted">지금은 진행 중인 밀담이 없어요.</p>`;
     const ended = entries(R.chats).filter(([, c]) => c.status === "ended").sort((a, b) => (b[1].startAt || 0) - (a[1].startAt || 0));
     $("#gEnded").innerHTML = ended.length ? ended.map(([k, c]) => `<button class="btn block ghost" data-view="${k}" style="margin:6px 0;justify-content:space-between"><span>${membersOf(c).map(nameOf).map(esc).join(" · ")}</span><span class="muted small">${hhmm(c.startAt)}</span></button>`).join("") : `<p class="muted small">끝난 밀담의 대화가 여기에 쌓여요. 게임 후 복기할 때 보여주세요.</p>`;
@@ -887,6 +942,8 @@ function paintGM() {
   if (G.tab === "set" && $("#openBtn")) {
     $("#openBtn").textContent = m.open ? "켜짐" : "꺼짐"; $("#openBtn").className = "btn " + (m.open ? "primary" : "");
     [...$("#gDur").children].forEach(b => b.classList.toggle("on", +b.dataset.s === m.duration));
+    const mm = m.maxMem === 0 ? 0 : (m.maxMem || 3);
+    [...$("#gMax").children].forEach(b => b.classList.toggle("on", +b.dataset.m === mm));
   }
   paintGMChat(); paintGMPick();
 }
