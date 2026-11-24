@@ -1171,15 +1171,16 @@ function buildTab() {
     body.onclick = async e => {
       const a = e.target.closest("[data-va]"); if (!a) return;
       const act = a.dataset.va, vid = a.dataset.vid, vp = `${roomPath()}/votes/${vid}`;
-      if (act === "new") { G.newVote = true; return paintGM(); }
+      if (act === "new") { G.newVote = true; G.optsEdited = false; return paintGM(); }
       if (act === "cancelnew") { G.newVote = false; return paintGM(); }
+      if (act === "refill") { G.optsEdited = false; $("#vOpts").value = voteCands().join("\n"); return toast("들어온 플레이어로 후보를 다시 채웠어요."); }
       if (act === "create") {
         const q = $("#vQ").value.trim() || "범인은 누구일까요?";
         const opts = [...new Set($("#vOpts").value.split("\n").map(s => s.trim()).filter(Boolean))].slice(0, 20);
         if (opts.length < 2) return toast("후보를 2개 이상 적어 주세요.", true);
         for (const [k, v] of entries(R.votes)) if (v.status === "open") await S.set(`${roomPath()}/votes/${k}/status`, "closed");
         await S.push(`${roomPath()}/votes`, {q, opts, status: "open", at: S.TS});
-        G.newVote = false; toast("투표를 열었어요. 플레이어 폰에 알림이 가요."); return;
+        G.newVote = false; G.optsEdited = false; toast("투표를 열었어요. 플레이어 폰에 알림이 가요."); return;
       }
       if (act === "close") { await S.set(`${vp}/status`, "closed"); return toast("투표를 마감했어요. 결과는 아직 GM만 봐요."); }
       if (act === "reopen") { await S.set(`${vp}/status`, "open"); return toast("투표를 다시 열었어요."); }
@@ -1187,6 +1188,8 @@ function buildTab() {
       if (act === "hide") { await S.update(vp, {status: "closed"}); return toast("결과 공개를 거뒀어요."); }
       if (act === "del" && confirm("이 투표를 지울까요? 표도 함께 사라져요.")) await S.remove(vp);
     };
+    // GM이 후보를 직접 고치면 그 뒤로는 자동으로 덮어쓰지 않아요
+    body.oninput = e => { if (e.target.id === "vOpts") G.optsEdited = true; };
   }
   if (G.tab === "set") {
     body.innerHTML = `
@@ -1364,11 +1367,21 @@ function voteGMHTML(vid, v) {
     ${v.status === "closed" ? `<button class="btn block" data-va="revealwho" data-vid="${vid}" style="margin-top:8px">누가 누구를 골랐는지까지 공개</button>` : ""}
     <div class="row" style="margin-top:8px"><button class="btn sm ghost grow" data-va="new">새 투표 만들기</button><button class="btn sm danger" data-va="del" data-vid="${vid}">지우기</button></div></section>`;
 }
+// 투표 후보: 방에 들어온 플레이어 전원(GM 제외, 들어온 순서). 아무도 없으면 캐릭터 명단을 써요.
+function voteCands() {
+  const notGM = n => n && !/^gm$/i.test(n);
+  const ps = entries(R.players).filter(([, p]) => notGM(p?.name?.trim()))
+    .sort((a, b) => (a[1].joinedAt || 0) - (b[1].joinedAt || 0)).map(([, p]) => p.name.trim());
+  return [...new Set(ps.length ? ps : roster().map(s => s.trim()).filter(notGM))];
+}
 function voteFormHTML() {
-  const cand = roster().length ? roster() : entries(R.players).map(([, p]) => p.name);
+  const cand = voteCands(); const n = entries(R.players).length;
   return `<section class="panel"><h2>투표 열기</h2><p class="muted small">열면 플레이어 폰에 알림이 가고, 각자 몰래 투표해요. 마감한 뒤 GM이 결과를 공개해요.</p>
     <label class="f" for="vQ">질문</label><input type="text" id="vQ" maxlength="60" value="범인은 누구일까요?">
-    <label class="f" for="vOpts">후보 (한 줄에 하나)</label><textarea id="vOpts" style="min-height:160px">${esc(cand.join("\n"))}</textarea>
+    <label class="f" for="vOpts">후보 (한 줄에 하나)</label>
+    <p class="muted small" style="margin:0 0 6px">${n ? `들어온 플레이어 ${cand.length}명이 자동으로 올라가요. GM은 빠지고, 누가 새로 들어오거나 나가면 바로 반영돼요. 직접 고치면 고친 내용이 유지돼요.` : "아직 들어온 플레이어가 없어서 캐릭터 명단을 넣었어요. 플레이어가 들어오면 자동으로 바뀌어요."}</p>
+    <textarea id="vOpts" style="min-height:160px">${esc(cand.join("\n"))}</textarea>
+    <button class="btn sm ghost" data-va="refill" style="margin-top:6px">들어온 플레이어로 다시 채우기</button>
     <div class="row" style="margin-top:10px">${curVote() ? `<button class="btn ghost grow" data-va="cancelnew">취소</button>` : ""}<button class="btn primary grow" data-va="create">투표 열기</button></div></section>`;
 }
 
@@ -1437,7 +1450,7 @@ function paintGM() {
     if (box._h !== html) {
       const keep = {q: $("#vQ")?.value, o: $("#vOpts")?.value};
       box._h = html; box.innerHTML = html;
-      if (keep.q !== undefined && $("#vQ")) { $("#vQ").value = keep.q; $("#vOpts").value = keep.o; }
+      if (keep.q !== undefined && $("#vQ")) { $("#vQ").value = keep.q; if (G.optsEdited) $("#vOpts").value = keep.o; }
     }
     const olds = vs.slice(G.newVote ? 0 : 1);
     $("#gVoteOld").innerHTML = olds.length ? olds.map(([k, v]) => `<div class="vote"><h3>${esc(v.q)} <span class="muted small">${hhmm(v.at)}</span></h3>${resultHTML(v, true)}<button class="btn sm danger" data-va="del" data-vid="${k}">지우기</button></div>`).join("") : `<p class="muted small">지난 투표 결과가 여기에 남아요.</p>`;
