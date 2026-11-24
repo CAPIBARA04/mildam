@@ -71,6 +71,8 @@ input[type=text],textarea,select{
   border:1px solid var(--seam);background:#15171A;outline:none;
 }
 input[type=text]:focus,textarea:focus,select:focus{border-color:var(--lamp)}
+/* 아이폰은 16px보다 작은 입력창을 누르면 화면을 확대해요 */
+input,textarea,select{font-size:16px!important}
 textarea{min-height:88px;resize:vertical}
 label.f{display:block;font-size:13px;color:var(--dim);margin:12px 0 6px}
 
@@ -175,12 +177,41 @@ label.f{display:block;font-size:13px;color:var(--dim);margin:12px 0 6px}
 .switch{display:flex;justify-content:space-between;align-items:center;gap:12px}
 .switch button{min-width:92px}
 hr.seam{border:0;border-top:1px solid var(--seam);margin:14px 0}
+/* 연결 상태 */
+.net{position:fixed;left:0;right:0;top:0;z-index:40;background:#5a2420;color:#fff;text-align:center;font-size:13px;font-weight:700;padding:6px calc(10px + env(safe-area-inset-right,0px)) 6px;display:none}
+.net.show{display:block}
+.left{font-variant-numeric:tabular-nums;color:var(--lamp);font-weight:700}
+/* 밀담 화면 안 알림 띠 */
+.cbanner{padding:0 12px}
+.cbanner .notice{margin:8px 0 0}
+.cbanner .btn{margin-top:8px}
+.leave{margin-top:6px;text-align:center}
+/* 투표 */
+.vote{border:1px solid var(--lamp);border-radius:var(--r-md);padding:12px;margin:10px 0;background:rgba(233,168,58,.06)}
+.vote h3{font-size:17px;margin-bottom:6px}
+.bar{position:relative;border:1px solid var(--seam);border-radius:var(--r-sm);padding:8px 10px;margin:6px 0;overflow:hidden}
+.bar i{position:absolute;left:0;top:0;bottom:0;background:rgba(233,168,58,.18)}
+.bar.top i{background:rgba(216,66,58,.28)}
+.bar span{position:relative}
+.bar .cnt{float:right;font-weight:700}
+.voters{display:block;font-size:12px;color:var(--dim);position:relative}
+/* 캐릭터 고르기 */
+.roster{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:8px}
+.roster button{min-height:52px;border-radius:var(--r-md);border:1px solid var(--seam);background:var(--foam-2);font-weight:700;cursor:pointer;padding:6px}
+.roster button small{display:block;font-weight:400;font-size:12px;color:var(--dim)}
+.roster button.taken{border-color:var(--steel)}
+.qa{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.qa button{min-height:36px;padding:4px 10px;border-radius:999px;border:1px solid var(--seam);background:transparent;font-size:13px;cursor:pointer}
+.stat{display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-top:1px solid var(--seam)}
+.stat:first-child{border-top:0}
+.stat .zero{color:#F2A49E}
 </style>
 </head>
 <body>
 <div id="app"></div>
 <div class="sheet" id="sheet"><div class="box" id="sheetBox"></div></div>
 <div class="toasts" id="toasts"></div>
+<div class="net" id="net" role="status">연결이 끊겼어요. 다시 연결하는 중…</div>
 
 <script type="module">
 /* =========================================================
@@ -197,6 +228,7 @@ const FIREBASE_CONFIG = {
 
 const params = new URLSearchParams(location.search);
 const DEMO = !FIREBASE_CONFIG.databaseURL || params.get("demo") === "1";
+const DQ = params.get("demo") ? "&demo=1" : "";
 const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const rid = (n = 8) => { const a = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; let s = ""; const r = crypto.getRandomValues(new Uint8Array(n)); for (const x of r) s += a[x % a.length]; return s; };
@@ -204,6 +236,9 @@ const fmt = ms => { ms = Math.max(0, ms); const t = Math.ceil(ms / 1000); return
 const durTxt = s => s < 60 ? `${s}초` : s % 60 ? `${Math.floor(s / 60)}분 ${s % 60}초` : `${s / 60}분`;
 const hhmm = t => t ? new Date(t).toLocaleTimeString("ko-KR", {hour: "2-digit", minute: "2-digit"}) : "";
 const idStore = DEMO ? sessionStorage : localStorage;
+const REQ_MS = 60000;                 // 밀담 요청은 60초 동안 유효
+const DURS = [[30, "30초"], [60, "1분"], [120, "2분"], [180, "3분"], [300, "5분"], [420, "7분"], [600, "10분"]];
+async function sha(s) { const b = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)); return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, "0")).join(""); }
 
 /* ===================== 저장소 (Firebase / 데모) ===================== */
 const TS = {".sv": "timestamp"};
@@ -215,7 +250,12 @@ function setAt(tree, path, val) {
   if (val === null || val === undefined) delete o[ks.at(-1)]; else o[ks.at(-1)] = val;
 }
 function resolveTS(v) {
-  if (v && typeof v === "object") { if (v[".sv"] === "timestamp") return Date.now(); const o = Array.isArray(v) ? [] : {}; for (const k in v) o[k] = resolveTS(v[k]); return o; }
+  if (v && typeof v === "object") {
+    if (v[".sv"] === "timestamp") return Date.now();
+    const o = Array.isArray(v) ? [] : {};
+    for (const k in v) { const r = resolveTS(v[k]); if (r !== null && r !== undefined) o[k] = r; }   // Firebase처럼 null 칸은 지워요
+    return o;
+  }
   return v;
 }
 
@@ -229,6 +269,7 @@ function demoStore() {
   setInterval(notify, 800);
   return {
     TS, offset: () => 0,
+    newKey: () => Date.now().toString(36) + rid(4),
     async get(p) { return getAt(read(), p); },
     async set(p, v) { const t = read(); setAt(t, p, resolveTS(v)); write(t); },
     async update(p, obj) { const t = read(); for (const k in obj) setAt(t, p + "/" + k, resolveTS(obj[k])); write(t); },
@@ -236,7 +277,8 @@ function demoStore() {
     async remove(p) { const t = read(); setAt(t, p, null); write(t); },
     on(p, cb) { const s = {path: p, cb, last: undefined}; subs.add(s); setTimeout(notify, 0); return () => subs.delete(s); },
     async tx(p, fn) { const t = read(); const nv = fn(getAt(t, p)); if (nv === undefined) return false; setAt(t, p, resolveTS(nv)); write(t); return true; },
-    presence() {},
+    presence(p) { const t = read(); setAt(t, p, true); write(t); },
+    connected(cb) { cb(true); },
   };
 }
 
@@ -245,9 +287,10 @@ async function firebaseStore() {
   const D = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js");
   const app = A.initializeApp(FIREBASE_CONFIG); const db = D.getDatabase(app);
   let off = 0; D.onValue(D.ref(db, ".info/serverTimeOffset"), s => off = s.val() || 0);
-  const fix = v => { if (v && typeof v === "object") { if (v[".sv"] === "timestamp") return D.serverTimestamp(); const o = {}; for (const k in v) o[k] = fix(v[k]); return o; } return v; };
+  const fix = v => { if (v && typeof v === "object") { if (v[".sv"] === "timestamp") return D.serverTimestamp(); const o = Array.isArray(v) ? [] : {}; for (const k in v) o[k] = fix(v[k]); return o; } return v; };
   return {
     TS, offset: () => off,
+    newKey: p => D.push(D.ref(db, p)).key,
     async get(p) { return (await D.get(D.ref(db, p))).val(); },
     set: (p, v) => D.set(D.ref(db, p), fix(v)),
     update: (p, obj) => D.update(D.ref(db, p), fix(obj)),
@@ -258,7 +301,17 @@ async function firebaseStore() {
     presence(p) {
       D.onValue(D.ref(db, ".info/connected"), s => { if (s.val()) { D.onDisconnect(D.ref(db, p)).set(false); D.set(D.ref(db, p), true); } });
     },
+    connected(cb) { D.onValue(D.ref(db, ".info/connected"), s => cb(!!s.val())); },
   };
+}
+
+/* 쓰기가 실패하면 조용히 넘어가지 않고 알려요 (B7) */
+function guard(st) {
+  for (const k of ["set", "update", "push", "remove", "tx"]) {
+    const f = st[k];
+    st[k] = (...a) => Promise.resolve().then(() => f(...a)).catch(e => { toast("저장하지 못했어요. 인터넷 연결을 확인해 주세요.", true); console.error(e); throw e; });
+  }
+  return st;
 }
 
 let S; // store
@@ -285,29 +338,131 @@ function openSheet(html) { $("#sheetBox").innerHTML = html; $("#sheet").classLis
 function closeSheet() { $("#sheet").classList.remove("show"); $("#sheetBox").innerHTML = ""; }
 $("#sheet").addEventListener("click", e => { if (e.target.id === "sheet") { if (typeof G !== "undefined") G.open = null; closeSheet(); } });
 
+/* 연결이 3초 넘게 끊기면 위에 띠를 보여요 (B7·편의 12) */
+let netTimer = null;
+function setNet(ok) {
+  clearTimeout(netTimer);
+  if (ok) $("#net").classList.remove("show");
+  else netTimer = setTimeout(() => $("#net").classList.add("show"), 3000);
+}
+
+function copy(t, msg) { (navigator.clipboard?.writeText(t) || Promise.reject()).then(() => toast(msg)).catch(() => prompt("복사해서 쓰세요", t)); }
+/* 텍스트 파일로 저장 (카톡 안 브라우저처럼 저장이 안 되면 복사 버튼을 써요) */
+function saveText(name, text) {
+  openSheet(`<div class="row" style="justify-content:space-between"><h2>기록 내보내기</h2><button class="btn sm ghost" id="exClose">닫기</button></div>
+    <p class="muted small">파일로 저장하거나 복사해서 메모 앱·카톡 나와의 채팅에 붙여 두세요. 카톡 안에서 열었다면 '복사'가 더 확실해요.</p>
+    <textarea readonly style="min-height:40dvh;font-size:13px!important" id="exText"></textarea>
+    <div class="row" style="margin-top:10px"><button class="btn grow" id="exCopy">복사</button><button class="btn primary grow" id="exSave">파일로 저장</button></div>`);
+  $("#exText").value = text;
+  $("#exClose").onclick = closeSheet;
+  $("#exCopy").onclick = () => copy(text, "복사했어요.");
+  $("#exSave").onclick = () => {
+    try { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob(["﻿" + text], {type: "text/plain;charset=utf-8"})); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); toast("파일을 저장했어요."); }
+    catch { toast("이 브라우저에서는 저장이 안 돼요. 복사를 써 주세요.", true); }
+  };
+}
+
+/* 내가 만든 방 (A5): 방을 만든 기기에 GM 링크를 남겨요 */
+const MYKEY = "mildam_my_rooms";
+function myRooms() { try { return JSON.parse(localStorage.getItem(MYKEY) || "[]"); } catch { return []; } }
+function rememberRoom(c, k, t) {
+  try { const list = myRooms().filter(x => x.c !== c); list.unshift({c, k, t, at: Date.now(), demo: !!DQ}); localStorage.setItem(MYKEY, JSON.stringify(list.slice(0, 12))); } catch {}
+}
+function forgetRoom(c) { try { localStorage.setItem(MYKEY, JSON.stringify(myRooms().filter(x => x.c !== c))); } catch {} }
+
 const lampSVG = `<svg viewBox="0 0 64 40" aria-hidden="true"><line x1="32" y1="0" x2="32" y2="12" stroke="#6F7782" stroke-width="2"/><path d="M20 26 L26 12 H38 L44 26 Z" fill="#3A3F45"/><ellipse cx="32" cy="27" rx="7" ry="3" fill="#E9A83A"/></svg>`;
 
 /* ===================== 공통: 방 데이터 ===================== */
 const code = (params.get("room") || "").toUpperCase();
 const roomPath = () => `rooms/${code}`;
 let R = null;               // 최신 방 데이터
-const nameOf = pid => pid === "GM" ? "GM" : (R?.players?.[pid]?.name || "(나간 사람)");
 const entries = o => Object.entries(o || {});
+/* 이름: 지금 참가자 → 밀담방·메시지에 남겨 둔 이름(D4) 순서로 찾아요 */
+const nameOf = (id, c) => id === "GM" ? "GM" : (R?.players?.[id]?.name || c?.names?.[id] || "(나간 사람)");
 const liveChats = () => entries(R?.chats).filter(([, c]) => c.status === "live");
 const membersOf = c => Object.keys(c.members || {});
 const sorted = o => entries(o).sort((a, b) => (a[1].at || 0) - (b[1].at || 0));
+const roster = () => (R?.meta?.roster || []).filter(Boolean);
+/* 진행 중이면 지금 방에 있는 사람, 끝났으면 한 번이라도 들어왔던 사람 */
+const chatIds = c => c.status === "live" || !c.names ? membersOf(c) : Object.keys(c.names);
+const chatNames = (c, skip) => c.gm1 && skip ? "GM과 1:1 대화" : (c.gm1 ? "GM ↔ " : "") + chatIds(c).filter(x => x !== skip).map(x => nameOf(x, c)).join(" · ");
 
 async function sysMsg(cid, text, alert = false) { await S.push(`${roomPath()}/messages/${cid}`, {from: "SYS", text, at: S.TS, alert}); }
+async function say(cid, from, text) { await S.push(`${roomPath()}/messages/${cid}`, {from, n: from === "GM" ? "GM" : nameOf(from), text, at: S.TS}); }
 
 function maxMem() { const m = R?.meta?.maxMem; return m === 0 ? 99 : (m || 3); }
 function memTxt() { const m = maxMem(); return m >= 99 ? "2명 이상(인원 제한 없음)" : m === 2 ? "2명" : `2~${m}명`; }
+
+/* ---------- '밀담 중' 표시 잡기·풀기 (B1·B3) ----------
+   참가자 한 명씩 트랜잭션으로 잡아서, 0.1초 차이로 두 요청을 수락해도 한 사람이 두 방에 들어가지 않아요. */
+const claimBusy = (x, cid) => S.tx(`${roomPath()}/players/${x}`, p => (!p || p.busy) ? undefined : {...p, busy: cid});
+const releaseBusy = (x, cid) => S.tx(`${roomPath()}/players/${x}`, p => { if (!p || p.busy !== cid) return undefined; const {busy, ...rest} = p; return rest; });
+
+/* 밀담방 열기: 요청 수락·GM 열기·GM 대신 시작 모두 여기로 와요 */
+async function openChat(mem, o = {}) {
+  const players = await S.get(`${roomPath()}/players`) || {};
+  const gone = mem.filter(x => !players[x]);
+  if (gone.length) return {ok: false, why: "방을 나간 참가자가 있어요"};
+  const busyNow = mem.filter(x => players[x].busy);
+  if (busyNow.length) return {ok: false, why: `${busyNow.map(x => players[x].name).join(", ")} 님이 이미 밀담 중이에요`};
+  const meta = await S.get(`${roomPath()}/meta`) || {};
+  const dur = o.dur || meta.duration || 180;
+  const cid = S.newKey(`${roomPath()}/chats`);
+  const members = {}, names = {}; mem.forEach(x => { members[x] = true; names[x] = players[x].name; });
+  const base = {members, names, status: "starting", at: now(), duration: dur};
+  if (o.by) base.by = o.by; if (o.req) base.req = o.req; if (o.gm1) base.gm1 = true;
+  await S.set(`${roomPath()}/chats/${cid}`, base);
+  const got = [];
+  for (const x of mem) {
+    if (await claimBusy(x, cid)) { got.push(x); continue; }
+    for (const y of got) await releaseBusy(y, cid);
+    await S.remove(`${roomPath()}/chats/${cid}`);
+    return {ok: false, why: `${names[x]} 님이 이미 밀담 중이에요`};
+  }
+  const t = now();
+  await S.update(`${roomPath()}/chats/${cid}`, {status: "live", startAt: t, endAt: t + dur * 1000, w60: dur <= 60, w10: dur <= 10});
+  return {ok: true, cid, dur};
+}
+
+const END_TXT = {time: "밀담 시간이 끝났습니다. 모두 방에서 나갔어요.", gm: "GM이 밀담을 종료했습니다.", all: "GM이 모든 밀담을 종료했습니다.", left: "남은 사람이 없어 밀담이 끝났어요."};
 async function endChat(cid, reason) {
   let mem = [];
   const ok = await S.tx(`${roomPath()}/chats/${cid}`, c => { if (!c || c.status !== "live") return undefined; mem = Object.keys(c.members || {}); return {...c, status: "ended", endedAt: now(), endReason: reason}; });
   if (!ok) return;
-  await sysMsg(cid, reason === "time" ? "밀담 시간이 끝났습니다. 모두 방에서 나갔어요." : reason === "gm" ? "GM이 밀담을 종료했습니다." : "밀담이 종료되었습니다.", true);
-  const up = {}; for (const p of mem) if (R?.players?.[p]?.busy === cid) up[`players/${p}/busy`] = null;
-  if (Object.keys(up).length) await S.update(roomPath(), up);
+  await sysMsg(cid, END_TXT[reason] || "밀담이 종료되었습니다.", true);
+  for (const p of mem) await releaseBusy(p, cid);
+}
+
+/* 밀담에서 혼자 나가기 (편의 1). 남은 사람이 1명이면 방이 끝나요. */
+async function leaveChat(cid, who, why = "left") {
+  let ended = false, rest = [], nm = nameOf(who);
+  const ok = await S.tx(`${roomPath()}/chats/${cid}`, c => {
+    if (!c || c.status !== "live" || !c.members?.[who]) return undefined;
+    nm = c.names?.[who] || nm;
+    const members = {...c.members}; delete members[who]; rest = Object.keys(members);
+    const left = {...(c.left || {}), [who]: now()};
+    if (rest.length < (c.gm1 ? 1 : 2)) { ended = true; return {...c, members, left, status: "ended", endedAt: now(), endReason: "left"}; }
+    return {...c, members, left};
+  });
+  if (!ok) return;
+  await sysMsg(cid, why === "kick" ? `${nm} 님이 방에서 나갔어요.` : `${nm} 님이 밀담을 끝내고 나갔어요.`);
+  await releaseBusy(who, cid);
+  if (ended) { await sysMsg(cid, END_TXT.left, true); for (const y of rest) await releaseBusy(y, cid); }
+}
+
+/* '밀담 중' 표시가 실제 밀담과 어긋나면 정리해요 (B3). 2.5초 넘게 계속 어긋날 때만 고쳐요. */
+const suspect = {};
+function reconcile(only) {
+  for (const [x, p] of entries(R?.players)) {
+    if (only && x !== only) continue;
+    const cid = p.busy; if (!cid) { delete suspect[x]; continue; }
+    const c = R.chats?.[cid];
+    const bad = !c || c.status === "ended" || (c.status === "starting" && now() - (c.at || 0) > 15000) || (c.status === "live" && !c.members?.[x]);
+    if (!bad) { delete suspect[x]; continue; }
+    const sp = suspect[x];
+    if (sp && sp.cid === cid && performance.now() - sp.t > 2500) { delete suspect[x]; releaseBusy(x, cid); if (c?.status === "starting") S.remove(`${roomPath()}/chats/${cid}`); }
+    else if (!sp || sp.cid !== cid) suspect[x] = {cid, t: performance.now()};
+  }
 }
 
 /* 시간 감시: 참가자·GM 어느 기기든 먼저 감지한 쪽이 처리 (중복 방지) */
@@ -321,13 +476,26 @@ async function watchClocks(scope) {
   }
 }
 
+/* 메시지 목록. 나중에 추가된 사람은 추가된 뒤의 대화만, 먼저 나간 사람은 나가기 전 대화만 봐요 (A3) */
+function visibleMsgs(cid, me) {
+  const c = R?.chats?.[cid] || {};
+  let list = sorted(R?.messages?.[cid]);
+  if (me && me !== "GM") {
+    const from = typeof c.added?.[me] === "number" ? c.added[me] - 1500 : 0;
+    const until = typeof c.left?.[me] === "number" ? c.left[me] + 1500 : Infinity;
+    list = list.filter(([, m]) => (m.at || 0) >= from && (m.at || 0) <= until);
+  }
+  return list;
+}
 function msgsHTML(cid, me) {
-  const list = sorted(R?.messages?.[cid]);
+  const c = R?.chats?.[cid] || {};
+  const list = visibleMsgs(cid, me);
   if (!list.length) return `<p class="muted center small">아직 대화가 없어요.</p>`;
   return list.map(([, m]) => {
     if (m.from === "SYS") return `<div class="msg sys${m.alert ? " alert" : ""}">${esc(m.text)}</div>`;
     const cls = m.from === me ? "me" : m.from === "GM" ? "gm" : "";
-    return `<div class="msg ${cls}"><span class="by">${esc(nameOf(m.from))} · ${hhmm(m.at)}</span>${esc(m.text)}</div>`;
+    const who = m.from === "GM" ? "GM" : (R?.players?.[m.from]?.name || m.n || nameOf(m.from, c));
+    return `<div class="msg ${cls}"><span class="by">${esc(who)} · ${hhmm(m.at)}</span>${esc(m.text)}</div>`;
   }).join("");
 }
 function paintMsgs(el, cid, me) {
@@ -336,12 +504,61 @@ function paintMsgs(el, cid, me) {
   if (atBottom || !el._init) { el.scrollTop = el.scrollHeight; el._init = true; }
 }
 
+/* ---------- 투표 ---------- */
+const votesSorted = () => entries(R?.votes).sort((a, b) => (b[1].at || 0) - (a[1].at || 0));
+const curVote = () => votesSorted()[0] || null;
+function tally(v) {
+  const opts = v.opts || []; const cnt = opts.map(() => 0); const who = opts.map(() => []);
+  for (const [p, b] of entries(v.ballots)) { const i = b?.o; if (i >= 0 && i < opts.length) { cnt[i]++; who[i].push(b.n || nameOf(p)); } }
+  const max = Math.max(0, ...cnt);
+  return {opts, cnt, who, max, total: cnt.reduce((a, b) => a + b, 0)};
+}
+function resultHTML(v, showWho) {
+  const t = tally(v);
+  if (!t.total) return `<p class="muted small">아무도 투표하지 않았어요.</p>`;
+  return t.opts.map((o, i) => {
+    const pct = Math.round(100 * t.cnt[i] / t.total);
+    return `<div class="bar ${t.cnt[i] === t.max ? "top" : ""}"><i style="width:${pct}%"></i><span>${esc(o)}</span><span class="cnt num">${t.cnt[i]}표</span>
+      ${showWho && t.who[i].length ? `<span class="voters">${t.who[i].map(esc).join(", ")}</span>` : ""}</div>`;
+  }).join("");
+}
+
+/* ---------- 기록 내보내기 (편의 8) ---------- */
+function chatLog(cid, me) {
+  const c = R.chats[cid];
+  const head = `■ ${chatNames(c)} (${hhmm(c.startAt)}~${hhmm(c.endedAt || c.endAt)})`;
+  const lines = visibleMsgs(cid, me).map(([, m]) => m.from === "SYS" ? `  (${m.text})` : `  [${hhmm(m.at)}] ${m.from === "GM" ? "GM" : (m.n || nameOf(m.from, c))}: ${m.text}`);
+  return [head, ...lines].join("\n");
+}
+function exportAll() {
+  const m = R.meta; const out = [];
+  out.push(`밀담방 기록 · ${m.title} (방 코드 ${code})`, `저장한 때: ${new Date().toLocaleString("ko-KR")}`, "");
+  out.push("[참가자]", entries(R.players).map(([, p]) => p.name).join(", ") || "-", "");
+  const chats = entries(R.chats).filter(([, c]) => c.startAt).sort((a, b) => a[1].startAt - b[1].startAt);
+  out.push(`[밀담] ${chats.length}번`);
+  chats.forEach(([k]) => out.push(chatLog(k, "GM"), ""));
+  const qs = sorted(R.questions);
+  if (qs.length) { out.push("[GM에게 온 질문]"); qs.forEach(([, q]) => out.push(`[${hhmm(q.at)}] ${nameOf(q.from)}: ${q.text}`, `   → ${q.answer || "(답 없음)"}`)); out.push(""); }
+  const ns = sorted(R.notices);
+  if (ns.length) { out.push("[공지]"); ns.forEach(([, n]) => out.push(`[${hhmm(n.at)}] ${n.text}`)); out.push(""); }
+  const vs = votesSorted().reverse();
+  if (vs.length) {
+    out.push("[투표]");
+    vs.forEach(([, v]) => { const t = tally(v); out.push(`· ${v.q} (${hhmm(v.at)})`); t.opts.forEach((o, i) => out.push(`   ${o}: ${t.cnt[i]}표${t.who[i].length ? " — " + t.who[i].join(", ") : ""}`)); });
+  }
+  return out.join("\n");
+}
+
 /* ===================== 홈 ===================== */
 function viewHome() {
+  const mine = myRooms().filter(x => !!x.demo === !!DQ);
   $("#app").innerHTML = `
   <div class="wrap">
     <div class="lampbar">${lampSVG}<div class="brand">밀담방</div><div class="brand-sub">머더 미스터리 전용 비밀 대화실</div></div>
     ${DEMO ? `<div class="demo">데모 모드예요. 이 기기의 브라우저 탭끼리만 연결돼요. 탭을 여러 개 열어 GM과 플레이어를 시험해 보세요.</div>` : ""}
+    ${mine.length ? `<section class="panel"><h2>내가 만든 방</h2><p class="muted small">이 기기에서 만든 방이에요. GM 화면을 닫았어도 여기서 다시 열 수 있어요.</p>
+      <ul class="list" id="mine">${mine.map(x => `<li><span class="grow"><span class="who">${esc(x.t || "밀담방")}</span><br><span class="muted small">${esc(x.c)} · ${new Date(x.at).toLocaleDateString("ko-KR")} ${hhmm(x.at)}${Date.now() - x.at > 86400000 ? ` <span class="chip">오래된 방</span>` : ""}</span></span>
+        <a class="btn sm primary" href="?room=${esc(x.c)}&gm=${esc(x.k)}${DQ}">GM으로 열기</a><button class="btn sm ghost" data-forget="${esc(x.c)}" aria-label="목록에서 지우기">✕</button></li>`).join("")}</ul></section>` : ""}
     <section class="panel">
       <h2>방 만들기</h2>
       <p class="muted small">GM이 방을 만들고 링크나 QR로 플레이어를 초대해요.</p>
@@ -358,35 +575,62 @@ function viewHome() {
   </div>`;
   let mins = 3;
   $("#dur").onclick = e => { const b = e.target.closest("button"); if (!b) return; mins = +b.dataset.m; [...$("#dur").children].forEach(x => x.classList.toggle("on", x === b)); };
+  if ($("#mine")) $("#mine").onclick = e => { const b = e.target.closest("[data-forget]"); if (b && confirm("목록에서만 지울까요? 방 자체는 남아 있어요.")) { forgetRoom(b.dataset.forget); viewHome(); } };
   $("#create").onclick = async () => {
-    const c = rid(5), key = rid(12);
-    await S.set(`rooms/${c}/meta`, {title: $("#title").value.trim() || "밀담방", duration: mins * 60, open: true, gmKey: key, createdAt: S.TS});
-    location.href = `?room=${c}&gm=${key}${DEMO && params.get("demo") ? "&demo=1" : ""}`;
+    $("#create").disabled = true;
+    const c = rid(5), key = rid(12), title = $("#title").value.trim() || "밀담방";
+    // GM 키는 그대로 두지 않고 지문(해시)만 저장해요. 플레이어 폰에 내려가도 GM 화면을 열 수 없어요 (C1)
+    await S.set(`rooms/${c}/meta`, {title, duration: mins * 60, open: true, gmHash: await sha(key), createdAt: S.TS});
+    rememberRoom(c, key, title);
+    location.href = `?room=${c}&gm=${key}${DQ}`;
   };
-  $("#go").onclick = () => { const c = $("#joinCode").value.trim().toUpperCase(); if (c) location.href = `?room=${c}${params.get("demo") ? "&demo=1" : ""}`; };
+  $("#go").onclick = () => { const c = $("#joinCode").value.trim().toUpperCase(); if (c) location.href = `?room=${c}${DQ}`; };
 }
 
 /* ===================== 플레이어 ===================== */
-let pid = null, P = {view: null, inChat: null, w60seen: {}, answered: {}, qRead: {}, notices: null, reqSeen: {}, pick: new Set(), wasMember: false, viewLog: null};
+let pid = null, P = {view: null, inChat: null, warned: {}, answered: {}, qRead: {}, notices: null, reqSeen: {}, pick: new Set(), wasMember: false, voteSeen: null, qDraft: "", buzz: 0, incSig: "", expSent: {}};
 
+function enterAs(k) { idStore.setItem(`mildam_pid_${code}`, k); pid = k; S.presence(`${roomPath()}/online/${pid}`); P.view = null; P.wasMember = false; renderPlayer(); }
+async function joinAs(name) {
+  name = name.trim(); if (!name) return;
+  const same = entries(R?.players).find(([, p]) => p.name === name);
+  if (same) {
+    if (!confirm(`'${name}'(으)로 이미 들어온 사람이 있어요.\n본인이면 이 폰으로 이어서 들어갈까요? (밀담 기록도 이어져요)`)) return;
+    return enterAs(same[0]);
+  }
+  const k = await S.push(`${roomPath()}/players`, {name, joinedAt: S.TS});
+  enterAs(k);
+}
+
+/* 입장: GM이 캐릭터를 미리 등록했으면 목록에서 고르고, 이미 들어온 캐릭터는 '이어서 입장'해요 (A6·D3·편의 4) */
 function viewJoin(meta) {
+  P.view = "join";
   $("#app").innerHTML = `
   <div class="wrap">
     <div class="lampbar">${lampSVG}<div class="brand">밀담방</div><div class="brand-sub">${esc(meta.title)}</div></div>
     ${DEMO ? `<div class="demo">데모 모드 · 이 탭은 한 명의 플레이어예요.</div>` : ""}
     <section class="panel">
       <h2>입장하기</h2>
-      <p class="muted small">실명 말고 오늘 맡은 <b>캐릭터 이름</b>을 적어주세요.</p>
-      <label class="f" for="nm">캐릭터 이름</label>
-      <input type="text" id="nm" maxlength="16" placeholder="예: 하루키">
-      <button class="btn primary block" id="enter" style="margin-top:14px">입장하기</button>
+      <div id="jRoster"></div>
+      <div id="jFree"></div>
     </section>
   </div>`;
-  $("#enter").onclick = async () => {
-    const name = $("#nm").value.trim(); if (!name) { $("#nm").focus(); return; }
-    const k = await S.push(`${roomPath()}/players`, {name, joinedAt: S.TS});
-    idStore.setItem(`mildam_pid_${code}`, k); pid = k; S.presence(`${roomPath()}/online/${pid}`); P.view = null; renderPlayer();
-  };
+  paintJoin();
+}
+function paintJoin() {
+  if (P.view !== "join" || !$("#jRoster")) return;
+  const ros = roster();
+  const taken = name => entries(R?.players).some(([, p]) => p.name === name);
+  const html = ros.length ? `<p class="muted small">오늘 맡은 <b>캐릭터</b>를 고르세요. 다른 폰이나 브라우저로 다시 들어올 때도 같은 이름을 고르면 이어서 들어가요.</p>
+    <div class="roster">${ros.map(n => `<button data-join="${esc(n)}" class="${taken(n) ? "taken" : ""}">${esc(n)}<small>${taken(n) ? "입장함 · 이어서 들어가기" : "고르기"}</small></button>`).join("")}</div>` : "";
+  if ($("#jRoster")._h !== html) { $("#jRoster")._h = html; $("#jRoster").innerHTML = html; }
+  if (!$("#jFree").innerHTML) {
+    $("#jFree").innerHTML = `${ros.length ? `<details style="margin-top:14px"><summary class="muted small">목록에 없는 이름으로 들어가기</summary>` : `<p class="muted small">실명 말고 오늘 맡은 <b>캐릭터 이름</b>을 적어주세요.</p>`}
+      <label class="f" for="nm">캐릭터 이름</label><input type="text" id="nm" maxlength="16" placeholder="예: 하루키">
+      <button class="btn primary block" id="enter" style="margin-top:14px">입장하기</button>${ros.length ? `</details>` : ""}`;
+    $("#enter").onclick = () => { const n = $("#nm").value.trim(); if (!n) return $("#nm").focus(); joinAs(n); };
+  }
+  $("#jRoster").onclick = e => { const b = e.target.closest("[data-join]"); if (b) joinAs(b.dataset.join); };
 }
 
 function shellLobby() {
@@ -395,9 +639,10 @@ function shellLobby() {
   <div class="wrap">
     <header class="row" style="justify-content:space-between;padding:4px 0 8px">
       <div><div class="brand" style="font-size:22px">밀담방</div><div class="muted small" id="pTitle"></div></div>
-      <div style="text-align:right"><div class="who" id="pName"></div><span class="tally idle" id="pState"><i></i>대기 중</span></div>
+      <div style="text-align:right"><div class="who" id="pName"></div><span class="tally idle" id="pState"><i></i>대기 중</span><div class="small" id="pGm"></div></div>
     </header>
     ${DEMO ? `<div class="demo">데모 모드</div>` : ""}
+    <div id="pVote"></div>
     <div id="pNotice"></div>
     <div id="pReqs"></div>
     <section class="panel">
@@ -424,26 +669,37 @@ function shellLobby() {
     <section class="panel">
       <h2>내 밀담 기록</h2>
       <div id="pLogs"></div>
+      <button class="btn block ghost" id="myExport" style="margin-top:8px">내 기록 저장 (밀담 대화 + 추리노트)</button>
     </section>
   </div>`;
   $("#reqBtn").onclick = openRequestSheet;
   $("#askBtn").onclick = () => openAsk();
   $("#noteBtn").onclick = () => openNote();
+  $("#myExport").onclick = () => saveText(`밀담방_${nameOf(pid)}_기록.txt`, myExport());
+  $("#pReqs").onclick = async e => {
+    const a = e.target.closest("[data-acc]"), d = e.target.closest("[data-dec]");
+    if (a) { a.disabled = true; acceptReq(a.dataset.acc); }
+    if (d) { await S.update(`${roomPath()}/requests/${d.dataset.dec}`, {status: "declined", by: pid}); }
+  };
+  $("#pOut").onclick = e => { const c = e.target.closest("[data-cancel]"); if (c) S.update(`${roomPath()}/requests/${c.dataset.cancel}`, {status: "cancelled"}); };
+  $("#pLogs").onclick = e => { const b = e.target.closest("[data-log]"); if (b) openLog(b.dataset.log, pid); };
+  $("#pVote").onclick = e => { const b = e.target.closest("[data-vote]"); if (b) openVoteSheet(b.dataset.vote); };
 }
 
 function openAsk() {
   openSheet(`<h2>GM에게 질문하기</h2><p class="muted small">GM에게만 보여요.</p>
     <textarea id="qText" maxlength="300" placeholder="예: 이 카드는 언제 공개해야 하나요?"></textarea>
     <div class="row" style="margin-top:12px"><button class="btn ghost grow" id="qCancel">취소</button><button class="btn primary grow" id="qSend">질문 보내기</button></div>`);
-  $("#qText").focus();
+  const ta = $("#qText"); ta.value = P.qDraft || ""; ta.focus();
+  ta.oninput = () => P.qDraft = ta.value;          // 쓰던 질문은 밀담방으로 옮겨져도 남아요 (D5)
   $("#qCancel").onclick = closeSheet;
-  $("#qSend").onclick = async () => { const t = $("#qText").value.trim(); if (!t) return; await S.push(`${roomPath()}/questions`, {from: pid, text: t, at: S.TS}); closeSheet(); toast("질문을 보냈어요. GM이 답하면 알려드릴게요."); };
+  $("#qSend").onclick = async () => { const t = ta.value.trim(); if (!t) return; await S.push(`${roomPath()}/questions`, {from: pid, n: nameOf(pid), text: t, at: S.TS}); P.qDraft = ""; closeSheet(); toast("질문을 보냈어요. GM이 답하면 알려드릴게요."); };
 }
 
 function openRequestSheet() {
   P.pick = new Set();
   const lim = maxMem() - 1;
-  openSheet(`<h2>누구와 밀담할까요?</h2><p class="muted small">${lim >= 98 ? "함께할 사람을 원하는 만큼" : lim === 1 ? "1명을" : `1~${lim}명을`} 고르세요. 상대가 모두 수락하면 밀담방이 열려요.</p><div id="pickList"></div>
+  openSheet(`<h2>누구와 밀담할까요?</h2><p class="muted small">${lim >= 98 ? "함께할 사람을 원하는 만큼" : lim === 1 ? "1명을" : `1~${lim}명을`} 고르세요. 상대가 모두 ${REQ_MS / 1000}초 안에 수락하면 밀담방이 열려요.</p><div id="pickList"></div>
     <div class="row" style="margin-top:12px"><button class="btn ghost grow" id="rCancel">취소</button><button class="btn primary grow" id="rSend" disabled>요청 보내기</button></div>`);
   paintPick();
   $("#rCancel").onclick = closeSheet;
@@ -454,6 +710,7 @@ function openRequestSheet() {
   };
   $("#rSend").onclick = async () => {
     if (!P.pick.size) return;
+    if (!R.meta.open) { closeSheet(); return toast("지금은 밀담 시간이 아니에요.", true); }
     const to = {}; P.pick.forEach(x => to[x] = true);
     await S.push(`${roomPath()}/requests`, {from: pid, to, accepted: {[pid]: true}, status: "pending", at: S.TS, t0: now()});
     closeSheet(); toast("밀담을 요청했어요. 상대의 수락을 기다려요.");
@@ -462,6 +719,7 @@ function openRequestSheet() {
 function paintPick() {
   const box = $("#pickList"); if (!box) return;
   const others = entries(R?.players).filter(([k]) => k !== pid);
+  for (const id of [...P.pick]) if (!R.players?.[id] || R.players[id].busy) P.pick.delete(id);
   box.innerHTML = others.length ? others.map(([k, p]) => {
     const busy = !!p.busy; const sel = P.pick.has(k);
     return `<div class="pick ${sel ? "sel" : ""} ${busy ? "busy" : ""}" data-id="${k}" role="checkbox" aria-checked="${sel}" tabindex="0">
@@ -471,109 +729,150 @@ function paintPick() {
   const btn = $("#rSend"); if (btn) btn.disabled = !P.pick.size;
 }
 
+/* 요청 수락: 수락하는 순간에도 만료·밀담 허용을 다시 확인해요 (A2·B4) */
 async function acceptReq(rk) {
-  await S.set(`${roomPath()}/requests/${rk}/accepted/${pid}`, true);
-  const r = await S.get(`${roomPath()}/requests/${rk}`);
+  const rp = `${roomPath()}/requests/${rk}`;
+  const r0 = await S.get(rp);
+  if (!r0 || r0.status !== "pending") return toast("이미 끝난 요청이에요.", true);
+  if (now() - (r0.t0 || 0) >= REQ_MS) { await S.update(rp, {status: "expired"}); return toast("요청 시간(60초)이 지났어요.", true); }
+  if (!R.meta.open) return toast("지금은 밀담 시간이 아니에요.", true);
+  await S.set(`${rp}/accepted/${pid}`, true);
+  const r = await S.get(rp);
   const need = [r.from, ...Object.keys(r.to || {})];
-  if (r.status === "pending" && need.every(x => r.accepted?.[x])) startChat(rk, need);
+  if (r.status === "pending" && need.every(x => r.accepted?.[x])) startFromReq(rk, need);
 }
-async function startChat(rk, mem) {
-  const players = await S.get(`${roomPath()}/players`) || {};
-  const busy = mem.filter(x => players[x]?.busy);
-  if (busy.length) { await S.update(`${roomPath()}/requests/${rk}`, {status: "failed", why: `${busy.map(nameOf).join(", ")} 님이 이미 밀담 중이에요`}); return; }
-  if (!await S.tx(`${roomPath()}/requests/${rk}/status`, s => s === "pending" ? "started" : undefined)) return;
-  const meta = await S.get(`${roomPath()}/meta`); const dur = meta.duration || 180;
-  const members = {}; mem.forEach(x => members[x] = true);
-  const t = now();
-  const cid = await S.push(`${roomPath()}/chats`, {members, startAt: t, endAt: t + dur * 1000, duration: dur, status: "live", w60: dur <= 60, w10: dur <= 10, req: rk});
-  const up = {}; mem.forEach(x => up[`players/${x}/busy`] = cid); up[`requests/${rk}/chat`] = cid;
-  await S.update(roomPath(), up);
-  await sysMsg(cid, `문이 닫혔습니다. 방음 중 · ${durTxt(dur)}`);
+async function startFromReq(rk, need, byGM = false) {
+  const rp = `${roomPath()}/requests/${rk}`;
+  if (!await S.tx(`${rp}/status`, s => s === "pending" ? "starting" : undefined)) return false;
+  const meta = await S.get(`${roomPath()}/meta`);
+  if (!byGM && !meta?.open) { await S.update(rp, {status: "failed", why: "GM이 밀담 시간을 닫았어요"}); return false; }
+  const res = await openChat(need, {req: rk, by: byGM ? "gm" : undefined});
+  await S.update(rp, res.ok ? {status: "started", chat: res.cid} : {status: "failed", why: res.why});
+  if (res.ok) await sysMsg(res.cid, `문이 닫혔습니다. 방음 중 · ${durTxt(res.dur)}`);
+  return res.ok;
 }
+const incomingReqs = () => entries(R?.requests).filter(([, r]) => r.status === "pending" && r.to?.[pid] && !r.accepted?.[pid] && now() - (r.t0 || 0) < REQ_MS);
+const myOutReq = () => entries(R?.requests).filter(([, r]) => r.from === pid).sort((a, b) => (b[1].t0 || 0) - (a[1].t0 || 0))[0];
+const leftTxt = r => `<span class="left" data-left="${r}"></span>`;
 
-async function gmStartChat(mem) {
-  const players = await S.get(`${roomPath()}/players`) || {};
-  const gone = mem.filter(x => !players[x]);
-  if (gone.length) { toast("방을 나간 참가자가 있어요. 다시 골라주세요.", true); return false; }
-  const busy = mem.filter(x => players[x]?.busy);
-  if (busy.length) { toast(`${busy.map(nameOf).join(", ")} 님이 이미 밀담 중이에요.`, true); return false; }
-  const meta = await S.get(`${roomPath()}/meta`); const dur = meta.duration || 180;
-  const members = {}; mem.forEach(x => members[x] = true);
-  const t = now();
-  const cid = await S.push(`${roomPath()}/chats`, {members, startAt: t, endAt: t + dur * 1000, duration: dur, status: "live", w60: dur <= 60, w10: dur <= 10, by: "gm"});
-  const up = {}; mem.forEach(x => up[`players/${x}/busy`] = cid);
-  await S.update(roomPath(), up);
-  await sysMsg(cid, `GM이 밀담방으로 불렀습니다. 문이 닫혔습니다 · 방음 중 · ${durTxt(dur)}`);
-  return true;
+/* 공지는 대기실·밀담 화면 어디서든 바로 알려요 (A4) */
+function checkNotices() {
+  const ns = sorted(R.notices);
+  if (P.notices !== null && ns.length > P.notices) { const last = ns.at(-1)[1]; toast("📢 GM 공지: " + last.text, false, 7000); chime("alert"); }
+  P.notices = ns.length;
+}
+function checkVote() {
+  const cv = curVote(); const sig = cv ? `${cv[0]}:${cv[1].status}` : "";
+  if (P.voteSeen !== null && sig !== P.voteSeen && cv) {
+    if (cv[1].status === "open") { chime("alert"); toast("🗳️ 투표가 시작됐어요: " + cv[1].q, false, 6000); }
+    if (cv[1].status === "revealed") { chime("alert"); toast("🗳️ 투표 결과가 공개됐어요", false, 5000); }
+  }
+  P.voteSeen = sig;
+}
+function myBallot(v) { const b = v?.ballots?.[pid]; return b && b.o >= 0 ? b.o : -1; }
+function voteCard(vid, v, compact) {
+  const mine = myBallot(v);
+  if (v.status === "open") return `<div class="vote"><h3>🗳️ ${esc(v.q)}</h3>
+    <p class="small muted" style="margin:0">${mine >= 0 ? `내 선택: <b>${esc(v.opts[mine])}</b> · 마감 전까지 바꿀 수 있어요.` : "아무도 내가 누구를 골랐는지 몰라요. GM이 마감한 뒤 결과를 공개해요."}</p>
+    <button class="btn ${mine >= 0 ? "" : "primary"} block" data-vote="${vid}" style="margin-top:8px">${mine >= 0 ? "투표 바꾸기" : "투표하기"}</button></div>`;
+  if (v.status === "closed") return compact ? "" : `<div class="vote"><h3>🗳️ ${esc(v.q)}</h3><p class="small muted" style="margin:0">투표가 마감됐어요. ${mine >= 0 ? `내 선택: <b>${esc(v.opts[mine])}</b>. ` : ""}GM이 결과를 공개할 때까지 기다려 주세요.</p></div>`;
+  if (v.status === "revealed") return compact ? "" : `<div class="vote"><h3>🗳️ 결과 · ${esc(v.q)}</h3>${resultHTML(v, v.showWho)}</div>`;
+  return "";
+}
+function openVoteSheet(vid) {
+  const v = R.votes?.[vid]; if (!v || v.status !== "open") return toast("지금은 투표할 수 없어요.", true);
+  let sel = myBallot(v);
+  openSheet(`<h2>🗳️ ${esc(v.q)}</h2><p class="muted small">한 명(하나)을 고르세요. 마감 전까지 바꿀 수 있고, 내가 누구를 골랐는지는 GM만 알아요.</p><div id="vList"></div>
+    <div class="row" style="margin-top:12px"><button class="btn ghost grow" id="vCancel">취소</button><button class="btn primary grow" id="vGo" disabled>이걸로 투표</button></div>`);
+  const paint = () => {
+    $("#vList").innerHTML = v.opts.map((o, i) => `<div class="pick ${i === sel ? "sel" : ""}" data-i="${i}" role="radio" aria-checked="${i === sel}" tabindex="0"><input type="radio" ${i === sel ? "checked" : ""} tabindex="-1"><span class="grow who">${esc(o)}</span></div>`).join("");
+    $("#vGo").disabled = sel < 0;
+  };
+  paint();
+  $("#vList").onclick = e => { const el = e.target.closest("[data-i]"); if (el) { sel = +el.dataset.i; paint(); } };
+  $("#vCancel").onclick = closeSheet;
+  $("#vGo").onclick = async () => {
+    const cur = await S.get(`${roomPath()}/votes/${vid}/status`);
+    if (cur !== "open") { closeSheet(); return toast("투표가 이미 마감됐어요.", true); }
+    await S.set(`${roomPath()}/votes/${vid}/ballots/${pid}`, {o: sel, n: nameOf(pid), at: S.TS});
+    closeSheet(); toast(`'${v.opts[sel]}'에 투표했어요. 마감 전까지 바꿀 수 있어요.`);
+  };
 }
 
 function paintLobby() {
   const meta = R.meta, me = R.players[pid];
   $("#pTitle").textContent = meta.title; $("#pName").textContent = me.name;
+  $("#pGm").innerHTML = R.gmOnline === true ? `<span class="tally idle"><i></i>GM 접속 중</span>` : R.gmOnline === false ? `<span class="tally off"><i></i>GM 연결 끊김</span>` : "";
+  // 투표
+  const cv = curVote();
+  $("#pVote").innerHTML = cv ? voteCard(cv[0], cv[1]) : "";
   // 공지
   const ns = sorted(R.notices);
-  if (P.notices !== null && ns.length > P.notices) { const last = ns.at(-1)[1]; toast("📢 GM 공지: " + last.text, false, 6000); chime("alert"); }
-  P.notices = ns.length;
   $("#pNotice").innerHTML = ns.slice(-2).reverse().map(([, n]) => `<div class="notice"><span class="small muted">GM 공지 · ${hhmm(n.at)}</span><br>${esc(n.text)}</div>`).join("");
-  // 받은 요청
-  const reqs = entries(R.requests).filter(([, r]) => r.status === "pending");
-  const incoming = reqs.filter(([, r]) => r.to?.[pid] && !r.accepted?.[pid] && now() - (r.t0 || 0) < 60000);
-  for (const [k] of incoming) if (!P.reqSeen[k]) { P.reqSeen[k] = 1; chime("alert"); toast("밀담 요청이 왔어요!"); }
+  // 받은 요청 (남은 시간 표시 · 편의 9)
+  const incoming = incomingReqs();
+  P.incSig = incoming.map(([k]) => k).join();
+  for (const [k] of incoming) if (!P.reqSeen[k]) { P.reqSeen[k] = 1; chime("alert"); toast("밀담 요청이 왔어요!"); P.buzz = now(); }
   $("#pReqs").innerHTML = incoming.map(([k, r]) => {
-    const others = Object.keys(r.to).filter(x => x !== pid).map(nameOf);
-    return `<div class="req"><b>${esc(nameOf(r.from))}</b> 님이 밀담을 요청했어요${others.length ? ` <span class="muted small">(함께: ${others.map(esc).join(", ")})</span>` : ""}
+    const others = Object.keys(r.to).filter(x => x !== pid).map(x => nameOf(x));
+    return `<div class="req"><div class="row" style="justify-content:space-between"><span><b>${esc(nameOf(r.from))}</b> 님이 밀담을 요청했어요</span>${leftTxt(k)}</div>
+      ${others.length ? `<span class="muted small">(함께: ${others.map(esc).join(", ")})</span>` : ""}
       <div class="row" style="margin-top:10px"><button class="btn danger grow" data-dec="${k}">거절</button><button class="btn primary grow" data-acc="${k}">수락</button></div></div>`;
   }).join("");
-  $("#pReqs").onclick = async e => {
-    const a = e.target.closest("[data-acc]"), d = e.target.closest("[data-dec]");
-    if (a) { a.disabled = true; acceptReq(a.dataset.acc); }
-    if (d) { await S.update(`${roomPath()}/requests/${d.dataset.dec}`, {status: "declined", by: pid}); }
-  };
   // 보낸 요청
-  const mine = entries(R.requests).filter(([, r]) => r.from === pid).sort((a, b) => (b[1].t0 || 0) - (a[1].t0 || 0))[0];
+  const mine = myOutReq();
   let out = "";
   if (mine) {
     const [k, r] = mine; const age = now() - (r.t0 || 0);
-    const names = Object.keys(r.to).map(nameOf).join(", ");
-    if (r.status === "pending" && age >= 60000) { S.update(`${roomPath()}/requests/${k}`, {status: "expired"}); }
-    if (r.status === "pending") out = `<div class="req" style="margin-top:12px"><span class="small">${esc(names)} 님의 수락을 기다리는 중…</span>
+    const names = Object.keys(r.to).map(x => nameOf(x)).join(", ");
+    if (r.status === "pending") out = `<div class="req" style="margin-top:12px"><div class="row" style="justify-content:space-between"><span class="small">${esc(names)} 님의 수락을 기다리는 중…</span>${leftTxt(k)}</div>
       <div class="muted small">${Object.keys(r.to).map(x => `${esc(nameOf(x))}: ${r.accepted?.[x] ? "수락" : "대기"}`).join(" / ")}</div>
       <button class="btn sm ghost" data-cancel="${k}" style="margin-top:8px">요청 취소</button></div>`;
-    else if (["declined", "expired", "failed"].includes(r.status) && !P.reqSeen["out" + k] && age < 120000) {
+    else if (["declined", "expired", "failed", "cancelled"].includes(r.status) && !P.reqSeen["out" + k] && age < 120000) {
       P.reqSeen["out" + k] = 1;
-      toast(r.status === "declined" ? `${nameOf(r.by)} 님이 밀담을 거절했어요.` : r.status === "expired" ? "응답이 없어 요청이 취소됐어요." : (r.why || "밀담을 시작할 수 없어요."), true);
+      if (r.status !== "cancelled" || r.why) toast(r.status === "declined" ? `${nameOf(r.by)} 님이 밀담을 거절했어요.` : r.status === "expired" ? "응답이 없어 요청이 취소됐어요." : (r.why || "밀담을 시작할 수 없어요."), true);
     }
   }
   $("#pOut").innerHTML = out;
-  $("#pOut").onclick = e => { const c = e.target.closest("[data-cancel]"); if (c) S.update(`${roomPath()}/requests/${c.dataset.cancel}`, {status: "cancelled"}); };
-  const pendingMine = mine && mine[1].status === "pending";
+  const pendingMine = mine && mine[1].status === "pending" && now() - (mine[1].t0 || 0) < REQ_MS;
   $("#reqBtn").disabled = !meta.open || pendingMine || !!me.busy;
   $("#pOpenTxt").textContent = !meta.open ? "지금은 밀담 시간이 아니에요. GM이 열면 요청할 수 있어요." : `한 번에 ${durTxt(meta.duration || 180)} 동안 ${memTxt()}이 비밀로 대화해요. 끝나면 자동으로 나와요.`;
   // 질문
   const qs = myQs(); qs.forEach(([k, q]) => { if (q.answer) P.qRead[k] = 1; });
-  $("#pQs").innerHTML = qHTML(qs);
+  const qh = qHTML(qs); if ($("#pQs")._h !== qh) { $("#pQs")._h = qh; $("#pQs").innerHTML = qh; }
   // 참가자
   $("#pPlayers").innerHTML = entries(R.players).map(([k, p]) => `<li><span class="grow"><span class="who">${esc(p.name)}</span>${k === pid ? ` <span class="chip">나</span>` : ""}</span>
     ${p.busy ? `<span class="tally on"><i></i>밀담 중</span>` : R.online?.[k] === false ? `<span class="tally off"><i></i>연결 끊김</span>` : `<span class="tally idle"><i></i>대기</span>`}</li>`).join("");
   // 기록
-  const logs = entries(R.chats).filter(([, c]) => c.status === "ended" && c.members?.[pid]).sort((a, b) => (b[1].startAt || 0) - (a[1].startAt || 0));
+  const logs = myLogs();
   $("#pLogs").innerHTML = logs.length ? logs.map(([k, c]) => `<button class="btn block ghost" data-log="${k}" style="margin:6px 0;justify-content:space-between">
-     <span>${membersOf(c).filter(x => x !== pid).map(nameOf).map(esc).join(", ")}</span><span class="muted small">${hhmm(c.startAt)}</span></button>`).join("") : `<p class="muted small">끝난 밀담의 대화는 여기서 다시 볼 수 있어요.</p>`;
-  $("#pLogs").onclick = e => { const b = e.target.closest("[data-log]"); if (b) openLog(b.dataset.log, pid); };
+     <span>${esc(chatNames(c, pid) || "(혼자)")}</span><span class="muted small">${hhmm(c.startAt)}</span></button>`).join("") : `<p class="muted small">끝난 밀담의 대화는 여기서 다시 볼 수 있어요.</p>`;
   if ($("#pickList")) paintPick();
   paintMyQs();
+  tickLobby();
+}
+const myLogs = () => entries(R.chats).filter(([, c]) => c.status === "ended" && (c.members?.[pid] || c.left?.[pid])).sort((a, b) => (b[1].startAt || 0) - (a[1].startAt || 0));
+
+/* 대기실 1초 감시: 요청 남은 시간·만료, 받은 요청 반복 알림 (A2·편의 9) */
+function tickLobby() {
+  document.querySelectorAll("[data-left]").forEach(el => { const r = R.requests?.[el.dataset.left]; if (!r) return; el.textContent = Math.max(0, Math.ceil((REQ_MS - (now() - (r.t0 || 0))) / 1000)) + "초"; });
+  const inc = incomingReqs();
+  if (inc.map(([k]) => k).join() !== P.incSig) return paintLobby();
+  const mine = myOutReq();
+  if (mine && mine[1].status === "pending" && now() - (mine[1].t0 || 0) >= REQ_MS && !P.expSent[mine[0]]) { P.expSent[mine[0]] = 1; S.update(`${roomPath()}/requests/${mine[0]}`, {status: "expired"}); }
+  if (inc.length && now() - P.buzz > 10000) { P.buzz = now(); chime("soft"); }
 }
 
 /* GM 질문·답변: 로비와 밀담 중 모두에서 확인 */
 function myQs() { return entries(R?.questions).filter(([, q]) => q.from === pid).sort((a, b) => (b[1].at || 0) - (a[1].at || 0)); }
 function qHTML(qs) {
   return qs.map(([, q]) => `<div class="q"><div class="small muted">${hhmm(q.at)} 내 질문</div>${esc(q.text)}
-    <hr class="seam">${q.answer ? `<div><span class="chip gm">GM 답변</span> ${esc(q.answer)}</div>` : `<div class="muted small">답변을 기다리는 중</div>`}</div>`).join("");
+    <hr class="seam">${q.answer ? `<div><span class="chip gm">GM 답변${q.editedAt ? " · 고침" : ""}</span> ${esc(q.answer)}</div>` : `<div class="muted small">답변을 기다리는 중</div>`}</div>`).join("");
 }
 function checkAnswers() {
-  for (const [k, q] of myQs()) if (q.answer && !P.answered[k]) {
-    if (P.answered.__init) { chime("alert"); toast("💬 GM 답변: " + q.answer, false, 8000); }
-    P.answered[k] = 1;
+  for (const [k, q] of myQs()) if (q.answer && P.answered[k] !== q.answer) {
+    if (P.answered.__init) { chime("alert"); toast((P.answered[k] ? "💬 GM이 답변을 고쳤어요: " : "💬 GM 답변: ") + q.answer, false, 8000); }
+    P.answered[k] = q.answer;
   }
   P.answered.__init = 1;
 }
@@ -585,10 +884,11 @@ function openMyQs() {
   paintMyQs();
 }
 function paintMyQs() {
-  const box = $("#mqList"); if (!box) return;
-  const qs = myQs(); qs.forEach(([k, q]) => { if (q.answer) P.qRead[k] = 1; });
-  const html = qs.length ? qHTML(qs) : `<p class="muted">아직 보낸 질문이 없어요.</p>`;
-  if (box._h !== html) { box._h = html; box.innerHTML = html; }
+  const box = $("#mqList"); if (box) {
+    const qs = myQs(); qs.forEach(([k, q]) => { if (q.answer) P.qRead[k] = 1; });
+    const html = qs.length ? qHTML(qs) : `<p class="muted">아직 보낸 질문이 없어요.</p>`;
+    if (box._h !== html) { box._h = html; box.innerHTML = html; }
+  }
   updQBadge();
 }
 function updQBadge() {
@@ -610,14 +910,27 @@ function saveNote(n) {
   }, 400);
 }
 const SUS = ["모름", "낮음", "중간", "높음"];
+function noteText() {
+  const n = loadNote(); const out = ["[추리노트]", n.free || "(자유 메모 없음)", ""];
+  for (const [k, v] of entries(n.people)) { if (!v.alibi && !v.memo && !v.sus) continue; out.push(`· ${nameOf(k)} (의심도 ${SUS[v.sus || 0]})`); if (v.alibi) out.push(`  알리바이: ${v.alibi}`); if (v.memo) out.push(`  메모: ${v.memo}`); }
+  return out.join("\n");
+}
+function myExport() {
+  const out = [`밀담방 · ${R.meta.title} · ${nameOf(pid)}`, `저장한 때: ${new Date().toLocaleString("ko-KR")}`, "", noteText(), "", "[내 밀담]"];
+  const logs = myLogs().reverse(); if (!logs.length) out.push("(없음)");
+  logs.forEach(([k]) => out.push(chatLog(k, pid), ""));
+  const qs = myQs().reverse(); if (qs.length) { out.push("[내 질문]"); qs.forEach(([, q]) => out.push(`[${hhmm(q.at)}] ${q.text}`, `   → ${q.answer || "(답 없음)"}`)); }
+  return out.join("\n");
+}
 function openNote(tab) {
   const n = loadNote(); n.people ||= {}; let cur = tab || n.tab || "free";
   openSheet(`<div class="note">
-    <div class="row" style="justify-content:space-between"><h2>📝 추리노트</h2><button class="btn sm ghost" id="noteClose">닫기</button></div>
+    <div class="row" style="justify-content:space-between"><h2>📝 추리노트</h2><span class="row" style="gap:6px"><button class="btn sm ghost" id="noteCopy">복사</button><button class="btn sm ghost" id="noteClose">닫기</button></span></div>
     <div class="note-tabs" role="tablist"><button data-tab="free">자유 메모</button><button data-tab="people">인물별</button></div>
     <div id="noteBody"></div>
     <div class="saved" id="noteSaved">내 폰에만 저장돼요. GM도 볼 수 없어요.</div></div>`);
   $("#noteClose").onclick = closeSheet;
+  $("#noteCopy").onclick = () => { localStorage.setItem(noteKey(), JSON.stringify(n)); copy(noteText(), "추리노트를 복사했어요."); };
   const tabs = $(".note-tabs");
   const show = t => {
     cur = t; n.tab = t; saveNote(n);
@@ -653,53 +966,71 @@ function openNote(tab) {
 function openLog(cid, me) {
   const c = R.chats[cid];
   openSheet(`<div class="row" style="justify-content:space-between"><h2>밀담 기록</h2><button class="btn sm ghost" id="lgClose">닫기</button></div>
-    <p class="muted small">${membersOf(c).map(nameOf).map(esc).join(", ")} · ${hhmm(c.startAt)}</p><div id="lgMsgs" style="max-height:60dvh;overflow:auto"></div>`);
+    <p class="muted small">${esc(chatNames(c))} · ${hhmm(c.startAt)}</p><div id="lgMsgs" style="max-height:60dvh;overflow:auto"></div>`);
   paintMsgs($("#lgMsgs"), cid, me); $("#lgClose").onclick = closeSheet;
 }
 
 function shellChat(cid) {
   P.view = "chat:" + cid;
+  const c = R.chats[cid];
   $("#app").innerHTML = `
   <div class="room">
     <div class="door foam">
-      <div class="top"><span class="sign"><i></i>방음 중</span><span class="row" style="gap:6px"><button class="btn sm ghost" id="noteIn" aria-label="추리노트">📝 노트</button><button class="btn sm ghost" id="myQ" style="position:relative">내 질문<span class="badge" id="qBadge" hidden></span></button><button class="btn sm ghost" id="askIn">질문하기</button></span></div>
+      <div class="top"><span class="sign"><i></i><span id="signT">${c.gm1 ? "GM과 1:1" : "방음 중"}</span></span><span class="row" style="gap:6px"><button class="btn sm ghost" id="noteIn" aria-label="추리노트">📝 노트</button><button class="btn sm ghost" id="myQ" style="position:relative">내 질문<span class="badge" id="qBadge" hidden></span></button><button class="btn sm ghost" id="askIn">질문하기</button></span></div>
       <div class="clock num" id="clock" aria-live="polite">0:00</div>
       <div class="members" id="mem"></div>
+      <div class="leave"><button class="btn sm danger" id="leaveBtn">${c.gm1 ? "대화 끝내기" : "밀담 끝내고 나가기"}</button></div>
     </div>
+    <div class="cbanner" id="cBanner"></div>
     <div class="msgs" id="msgs"></div>
     <form class="composer" id="cmp" autocomplete="off"><input type="text" id="cIn" maxlength="500" placeholder="비밀 이야기를 적어주세요" enterkeyhint="send"><button class="btn primary">보내기</button></form>
   </div>`;
-  $("#cmp").onsubmit = async e => { e.preventDefault(); const t = $("#cIn").value.trim(); if (!t) return; $("#cIn").value = ""; await S.push(`${roomPath()}/messages/${cid}`, {from: pid, text: t, at: S.TS}); };
+  $("#cmp").onsubmit = async e => { e.preventDefault(); const t = $("#cIn").value.trim(); if (!t) return; $("#cIn").value = ""; await say(cid, pid, t); };
   $("#askIn").onclick = () => openAsk();
   $("#myQ").onclick = () => openMyQs();
   $("#noteIn").onclick = () => openNote();
+  $("#leaveBtn").onclick = () => { const cc = R.chats[cid]; if (confirm(cc?.gm1 ? "GM과의 대화를 끝낼까요?" : "밀담에서 나갈까요? 다시 들어올 수 없어요.")) leaveChat(cid, pid); };
+  $("#cBanner").onclick = e => { const b = e.target.closest("[data-vote]"); if (b) openVoteSheet(b.dataset.vote); };
 }
 function paintChat(cid) {
   const c = R.chats[cid];
-  $("#mem").textContent = membersOf(c).map(nameOf).join(" · ") + " · GM이 들을 수 있어요";
+  $("#mem").textContent = c.gm1 ? "GM과 1:1 대화 · 다른 사람은 볼 수 없어요" : chatNames(c) + " · GM이 들을 수 있어요";
+  $("#signT").textContent = c.gm1 ? "GM과 1:1" : "방음 중"; $("#leaveBtn").textContent = c.gm1 ? "대화 끝내기" : "밀담 끝내고 나가기";
+  // 밀담 중에도 최근 공지(10분 안)와 진행 중인 투표를 보여 줘요 (A4)
+  const ln = sorted(R.notices).at(-1)?.[1];
+  const cv = curVote();
+  const bh = (ln && now() - (ln.at || 0) < 600000 ? `<div class="notice"><span class="small muted">GM 공지 · ${hhmm(ln.at)}</span><br>${esc(ln.text)}</div>` : "")
+    + (cv && cv[1].status === "open" ? `<button class="btn sm ${myBallot(cv[1]) >= 0 ? "" : "primary"} block" data-vote="${cv[0]}">🗳️ ${myBallot(cv[1]) >= 0 ? "투표 바꾸기" : "투표하기"} · ${esc(cv[1].q)}</button>` : "");
+  if ($("#cBanner")._h !== bh) { $("#cBanner")._h = bh; $("#cBanner").innerHTML = bh; }
   paintMsgs($("#msgs"), cid, pid);
   paintMyQs(); updQBadge();
-  if (c.w60 && c.duration > 60 && !P.w60seen[cid]) { P.w60seen[cid] = 1; chime("alert"); toast("⏰ 1분 남았습니다", true); }
 }
 
 function renderPlayer() {
-  if (!R || !R.meta) { $("#app").innerHTML = `<div class="wrap"><section class="panel center"><h2>방을 찾을 수 없어요</h2><p class="muted">코드를 다시 확인하거나 GM에게 새 링크를 받아주세요.</p><a class="btn" href="?">처음으로</a></section></div>`; return; }
+  if (!R || !R.meta) { P.view = "none"; $("#app").innerHTML = `<div class="wrap"><section class="panel center"><h2>방을 찾을 수 없어요</h2><p class="muted">코드를 다시 확인하거나 GM에게 새 링크를 받아주세요.</p><a class="btn" href="?${DQ.slice(1)}">처음으로</a></section></div>`; return; }
   if (!pid || !R.players?.[pid]) {
     if (pid && P.wasMember) { toast("GM이 방에서 내보냈어요.", true); idStore.removeItem(`mildam_pid_${code}`); pid = null; P.wasMember = false; }
-    if (P.view !== "join") { P.view = "join"; viewJoin(R.meta); }
+    if (P.view !== "join") viewJoin(R.meta); else paintJoin();
     return;
   }
   P.wasMember = true;
-  checkAnswers();
+  checkAnswers(); checkNotices(); checkVote();
+  reconcile(pid);
   const my = liveChats().find(([, c]) => c.members?.[pid]);
   if (my) {
     const [cid] = my;
-    if (P.view !== "chat:" + cid) { closeSheet(); shellChat(cid); const viaGM = my[1].by === "gm" || my[1].added?.[pid]; chime(viaGM ? "alert" : "soft"); if (my[1].added?.[pid]) toast("🔔 GM이 진행 중인 밀담방에 추가했어요", true, 4500); else if (my[1].by === "gm") toast("🔔 GM이 밀담방으로 불렀어요", true, 4500); }
+    if (P.view !== "chat:" + cid) {
+      closeSheet(); shellChat(cid);
+      const viaGM = my[1].by === "gm" || my[1].added?.[pid]; chime(viaGM ? "alert" : "soft");
+      if (my[1].added?.[pid]) toast("🔔 GM이 진행 중인 밀담방에 추가했어요", true, 4500);
+      else if (my[1].gm1) toast("🔔 GM이 1:1 대화를 열었어요", true, 4500);
+      else if (my[1].by === "gm") toast("🔔 GM이 밀담방으로 불렀어요", true, 4500);
+    }
     P.inChat = cid; paintChat(cid);
   } else {
     if (P.inChat) {
       const c = R.chats?.[P.inChat];
-      toast(c?.endReason === "gm" ? "GM이 밀담을 종료했어요." : "밀담 시간이 끝나 방에서 나왔어요.", true, 5000); chime("end");
+      toast(c?.left?.[pid] ? "밀담에서 나왔어요." : c?.endReason === "gm" || c?.endReason === "all" ? "GM이 밀담을 종료했어요." : c?.endReason === "left" ? "다른 사람이 모두 나가서 밀담이 끝났어요." : "밀담 시간이 끝나 방에서 나왔어요.", true, 5000); chime("end");
       P.inChat = null;
     }
     if (P.view !== "lobby") shellLobby();
@@ -708,15 +1039,22 @@ function renderPlayer() {
 }
 
 function tickPlayer() {
-  if (!R || !P.inChat) return;
+  if (!R || !pid || !R.players?.[pid]) return;
+  if (P.view === "lobby") return tickLobby();
+  if (!P.inChat) return;
   const c = R.chats?.[P.inChat]; if (!c || c.status !== "live") return;
   const rem = c.endAt - now(); const el = $("#clock");
   if (el) { el.textContent = fmt(rem); el.classList.toggle("warn", rem <= 60000); }
+  // 남은 시간 기준 알림: 연장 뒤 다시 1분이 남아도, 마지막 1분에 추가된 사람에게도 맞게 울려요 (D2)
+  const w = P.warned[P.inChat] ||= {};
+  if (rem <= 60000 && rem > 10000 && c.duration > 60 && w.m60 !== c.endAt) { w.m60 = c.endAt; chime("alert"); toast("⏰ 1분 남았습니다", true); }
+  if (rem <= 10000 && rem > 0 && w.s10 !== c.endAt) { w.s10 = c.endAt; chime("soft"); }
   watchClocks(cc => cc.members?.[pid]);
 }
 
 /* ===================== GM ===================== */
-let G = {tab: "invite", seenQ: null, open: null};
+let G = {tab: "invite", seenQ: null, open: null, editQ: null, wake: null, wantWake: false, newVote: false, statOpen: false};
+const QUICK = ["답할 수 없어요", "룰북·설정서에 적힌 대로예요", "조금만 기다려 주세요", "네, 맞아요", "아니요"];
 
 function shellGM() {
   $("#app").innerHTML = `
@@ -726,9 +1064,10 @@ function shellGM() {
       <span class="tally" id="gLive"><i></i></span>
     </header>
     ${DEMO ? `<div class="demo">데모 모드 · 다른 탭에서 플레이어 링크를 열어 시험해 보세요.</div>` : ""}
+    <div id="gOld"></div>
     <nav class="tabs" id="tabs">
       <button data-t="invite">초대</button><button data-t="rooms">밀담방<span class="badge" id="bRooms" hidden></span></button>
-      <button data-t="qs">질문<span class="badge" id="bQs" hidden></span></button><button data-t="set">설정</button>
+      <button data-t="qs">질문<span class="badge" id="bQs" hidden></span></button><button data-t="vote">투표<span class="badge" id="bVote" hidden></span></button><button data-t="set">설정</button>
     </nav>
     <div id="gBody"></div>
   </div>`;
@@ -736,77 +1075,167 @@ function shellGM() {
   buildTab();
 }
 
+/* 내보내기: 진행 중인 요청을 모두 취소하고, 밀담 중이면 방에서 빼요 (B2) */
+async function kickPlayer(x) {
+  for (const [k, r] of entries(R.requests)) if (r.status === "pending" && (r.from === x || r.to?.[x])) await S.update(`${roomPath()}/requests/${k}`, {status: "cancelled", why: `${nameOf(x)} 님이 방을 나가서 요청이 취소됐어요`});
+  const cid = R.players?.[x]?.busy; if (cid && R.chats?.[cid]?.status === "live") await leaveChat(cid, x, "kick");
+  for (const [vid, v] of entries(R.votes)) if (v.status === "open" && v.ballots?.[x]) await S.remove(`${roomPath()}/votes/${vid}/ballots/${x}`);
+  await S.remove(`${roomPath()}/players/${x}`);
+}
+/* 밀담 허용을 끄면 대기 중인 요청도 함께 취소해요 (B4) */
+async function setOpen(on) {
+  await S.set(`${roomPath()}/meta/open`, on);
+  if (!on) for (const [k, r] of entries(R.requests)) if (r.status === "pending") await S.update(`${roomPath()}/requests/${k}`, {status: "cancelled", why: "GM이 밀담 시간을 닫아서 요청이 취소됐어요"});
+}
+async function endAll(close) {
+  if (close) await setOpen(false);
+  for (const [cid] of liveChats()) await endChat(cid, "all");
+  toast(close ? "모든 밀담을 끝내고 밀담 시간을 닫았어요." : "모든 밀담을 끝냈어요.");
+}
+const pendingReqs = () => entries(R?.requests).filter(([, r]) => r.status === "pending" && now() - (r.t0 || 0) < REQ_MS).sort((a, b) => (a[1].t0 || 0) - (b[1].t0 || 0));
+
+/* 화면 켜두기: 다른 앱에 다녀오면 다시 걸어요 (B6) */
+async function wakeOn() {
+  try { G.wake = await navigator.wakeLock.request("screen"); G.wantWake = true; G.wake.addEventListener("release", () => { G.wake = null; paintWake(); }); }
+  catch { G.wake = null; if (!navigator.wakeLock) { G.wantWake = false; toast("이 기기는 화면 켜두기를 지원하지 않아요.", true); } }
+  paintWake();
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && G.wantWake && !G.wake) wakeOn(); });
+function paintWake() { const b = $("#wake"); if (!b) return; b.textContent = G.wake ? "화면 켜두기: 켜짐" : G.wantWake ? "화면 켜두기: 다시 켜는 중" : "화면 켜두기"; b.className = "btn grow" + (G.wake ? " primary" : ""); }
+
 function buildTab() {
   [...$("#tabs").children].forEach(b => b.classList.toggle("on", b.dataset.t === G.tab));
   const body = $("#gBody"); body.onclick = null;
-  const playerLink = `${location.origin}${location.pathname}?room=${code}${params.get("demo") ? "&demo=1" : ""}`;
+  const playerLink = `${location.origin}${location.pathname}?room=${code}${DQ}`;
   if (G.tab === "invite") {
     body.innerHTML = `
     <section class="panel center">
-      <h2>플레이어 초대</h2><p class="muted small">QR을 찍거나 링크를 단톡방에 보내세요.</p>
+      <h2>플레이어 초대</h2><p class="muted small">QR을 찍거나 링크를 단톡방에 보내세요. 한 가지 방법으로 통일하면 같은 사람이 두 번 들어오는 일이 줄어요.</p>
       <div class="code">${code}</div><div id="qr"></div>
       <div class="row"><input type="text" readonly value="${esc(playerLink)}" id="plink" class="grow"><button class="btn" id="copy">복사</button></div>
     </section>
+    <section class="panel"><h2>캐릭터 이름 미리 등록</h2><p class="muted small">한 줄에 한 명씩 적어 두면 플레이어는 목록에서 고르기만 해요. 폰이나 브라우저가 바뀌어도 같은 캐릭터로 이어서 들어와요.</p>
+      <textarea id="roster" placeholder="예:&#10;하루키&#10;나츠미&#10;도하"></textarea>
+      <button class="btn block" id="rosterSave" style="margin-top:8px">저장</button></section>
     <section class="panel"><h2>참가자 <span class="muted small" id="pc"></span></h2><ul class="list" id="gPlayers"></ul></section>
-    <section class="panel"><h2>GM 화면을 다른 기기에서 열기</h2><p class="muted small">이 링크는 GM 권한이 있어요. 플레이어에게 보내지 마세요.</p>
+    <section class="panel"><h2>GM 화면을 다른 기기에서 열기</h2><p class="muted small">이 링크는 GM 권한이 있어요. 플레이어에게 보내지 마세요. 방을 만든 기기에서는 첫 화면 '내가 만든 방'에서도 다시 열 수 있어요.</p>
       <button class="btn block ghost" id="copyGm">GM 링크 복사</button></section>`;
     try { new QRCode($("#qr"), {text: playerLink, width: 184, height: 184, correctLevel: QRCode.CorrectLevel.M}); } catch { $("#qr").innerHTML = `<p class="muted small">QR을 불러오지 못했어요. 링크를 복사해 주세요.</p>`; }
+    $("#roster").value = roster().join("\n");
+    $("#rosterSave").onclick = async () => {
+      const list = [...new Set($("#roster").value.split(/[\n,]/).map(s => s.trim().slice(0, 16)).filter(Boolean))];
+      await S.set(`${roomPath()}/meta/roster`, list.length ? list : null); toast(list.length ? `캐릭터 ${list.length}명을 등록했어요.` : "등록한 캐릭터를 지웠어요.");
+    };
     $("#copy").onclick = () => copy(playerLink, "초대 링크를 복사했어요.");
     $("#copyGm").onclick = () => copy(location.href, "GM 링크를 복사했어요.");
-    $("#gPlayers").onclick = async e => { const b = e.target.closest("[data-kick]"); if (b && confirm(`${nameOf(b.dataset.kick)} 님을 내보낼까요?`)) await S.remove(`${roomPath()}/players/${b.dataset.kick}`); };
+    $("#gPlayers").onclick = async e => { const b = e.target.closest("[data-kick]"); if (b && confirm(`${nameOf(b.dataset.kick)} 님을 내보낼까요?`)) await kickPlayer(b.dataset.kick); };
   }
   if (G.tab === "rooms") {
-    body.innerHTML = `<section class="panel"><h2>밀담방 열기</h2><p class="muted small">참가자 ${memTxt()}을 골라 바로 밀담방에 넣어요. 수락 없이 들어가고, 시간·알림·자동 퇴장은 똑같이 적용돼요.</p>
+    body.innerHTML = `<section class="panel"><h2>밀담방 열기</h2><p class="muted small">참가자를 골라 바로 밀담방에 넣어요. 1명만 고르면 <b>GM과 1:1 대화</b>가 열려요. 수락 없이 들어가고, 시간·알림·자동 퇴장은 똑같이 적용돼요.</p>
         <button class="btn primary block" id="gOpenRoom">참가자 고르기</button></section>
-      <section class="panel"><h2>진행 중인 밀담</h2><div id="gLiveList"></div></section>
+      <section class="panel"><h2>대기 중인 요청</h2><div id="gReqs"></div></section>
+      <section class="panel"><div class="row" style="justify-content:space-between"><h2>진행 중인 밀담</h2><button class="btn sm danger" id="gEndAll">모두 종료</button></div><div id="gLiveList"></div></section>
+      <section class="panel"><div class="row" style="justify-content:space-between"><h2>밀담 현황</h2><button class="btn sm ghost" id="gStatT"></button></div><div id="gStat"></div></section>
       <section class="panel"><h2>끝난 밀담</h2><div id="gEnded"></div></section>`;
     body.onclick = async e => {
       const v = e.target.closest("[data-view]"), x = e.target.closest("[data-ext]"), s = e.target.closest("[data-stop]");
       if (e.target.closest("#gOpenRoom")) return openGMPick();
+      if (e.target.closest("#gEndAll")) return openEndAll();
+      if (e.target.closest("#gStatT")) { G.statOpen = !G.statOpen; return paintGM(); }
       const ad = e.target.closest("[data-add]"); if (ad) return openGMChat(ad.dataset.add, true);
+      const rs = e.target.closest("[data-rstart]"), rc = e.target.closest("[data-rcancel]");
+      if (rs) { rs.disabled = true; const r = R.requests[rs.dataset.rstart]; if (r && !await startFromReq(rs.dataset.rstart, [r.from, ...Object.keys(r.to || {})], true)) toast("시작하지 못했어요. 이미 밀담 중인 사람이 있는지 보세요.", true); return; }
+      if (rc) return S.update(`${roomPath()}/requests/${rc.dataset.rcancel}`, {status: "cancelled", why: "GM이 요청을 취소했어요"});
       if (v) openGMChat(v.dataset.view);
       if (x) { const cid = x.dataset.ext; await S.tx(`${roomPath()}/chats/${cid}`, c => c && c.status === "live" ? {...c, endAt: c.endAt + 60000, w60: (c.endAt + 60000 - now()) <= 60000, w10: false} : undefined); sysMsg(cid, "GM이 시간을 1분 연장했어요."); }
       if (s && confirm("이 밀담을 지금 끝낼까요?")) endChat(s.dataset.stop, "gm");
     };
   }
   if (G.tab === "qs") {
-    body.innerHTML = `<section class="panel"><h2>질문함</h2><p class="muted small">새 질문이 오면 소리와 진동으로 알려드려요. 소리가 안 나면 화면을 한 번 눌러주세요.</p><div id="gQs"></div></section>`;
+    body.innerHTML = `<section class="panel"><h2>질문함</h2><p class="muted small">새 질문이 오면 소리와 진동으로 알려드려요. 소리가 안 나면 화면을 한 번 눌러주세요. 아래 짧은 답 버튼은 누르면 바로 보내져요.</p><div id="gQs"></div></section>`;
     body.onclick = async e => {
+      const qa = e.target.closest("[data-qa]");
+      if (qa) { await S.update(`${roomPath()}/questions/${qa.dataset.k}`, {answer: QUICK[+qa.dataset.qa], answeredAt: S.TS}); toast("답변을 보냈어요."); return; }
+      const ed = e.target.closest("[data-edit]");
+      if (ed) { G.editQ = ed.dataset.edit; $("#gQs")._h = null; paintGM(); const ta = $(`#ans-${G.editQ}`); if (ta) { ta.value = R.questions[G.editQ]?.answer || ""; ta.focus(); } return; }
+      if (e.target.closest("[data-editcancel]")) { G.editQ = null; $("#gQs")._h = null; return paintGM(); }
       const b = e.target.closest("[data-ans]"); if (!b) return;
       const ta = $(`#ans-${b.dataset.ans}`); const t = ta.value.trim(); if (!t) return;
-      await S.update(`${roomPath()}/questions/${b.dataset.ans}`, {answer: t, answeredAt: S.TS}); toast("답변을 보냈어요.");
+      const editing = !!R.questions[b.dataset.ans]?.answer;
+      await S.update(`${roomPath()}/questions/${b.dataset.ans}`, editing ? {answer: t, editedAt: S.TS} : {answer: t, answeredAt: S.TS});
+      G.editQ = null; toast(editing ? "답변을 고쳤어요." : "답변을 보냈어요.");
+    };
+  }
+  if (G.tab === "vote") {
+    body.innerHTML = `<div id="gVote"></div><section class="panel"><h2>지난 투표</h2><div id="gVoteOld"></div></section>`;
+    body.onclick = async e => {
+      const a = e.target.closest("[data-va]"); if (!a) return;
+      const act = a.dataset.va, vid = a.dataset.vid, vp = `${roomPath()}/votes/${vid}`;
+      if (act === "new") { G.newVote = true; return paintGM(); }
+      if (act === "cancelnew") { G.newVote = false; return paintGM(); }
+      if (act === "create") {
+        const q = $("#vQ").value.trim() || "범인은 누구일까요?";
+        const opts = [...new Set($("#vOpts").value.split("\n").map(s => s.trim()).filter(Boolean))].slice(0, 20);
+        if (opts.length < 2) return toast("후보를 2개 이상 적어 주세요.", true);
+        for (const [k, v] of entries(R.votes)) if (v.status === "open") await S.set(`${roomPath()}/votes/${k}/status`, "closed");
+        await S.push(`${roomPath()}/votes`, {q, opts, status: "open", at: S.TS});
+        G.newVote = false; toast("투표를 열었어요. 플레이어 폰에 알림이 가요."); return;
+      }
+      if (act === "close") { await S.set(`${vp}/status`, "closed"); return toast("투표를 마감했어요. 결과는 아직 GM만 봐요."); }
+      if (act === "reopen") { await S.set(`${vp}/status`, "open"); return toast("투표를 다시 열었어요."); }
+      if (act === "reveal" || act === "revealwho") { await S.update(vp, {status: "revealed", showWho: act === "revealwho", revealedAt: S.TS}); return toast("결과를 모두에게 공개했어요."); }
+      if (act === "hide") { await S.update(vp, {status: "closed"}); return toast("결과 공개를 거뒀어요."); }
+      if (act === "del" && confirm("이 투표를 지울까요? 표도 함께 사라져요.")) await S.remove(vp);
     };
   }
   if (G.tab === "set") {
     body.innerHTML = `
     <section class="panel">
-      <div class="switch"><div><h2>밀담 허용</h2><p class="muted small" style="margin:0">끄면 플레이어가 밀담을 요청할 수 없어요.</p></div><button class="btn" id="openBtn"></button></div>
+      <div class="switch"><div><h2>밀담 허용</h2><p class="muted small" style="margin:0">끄면 플레이어가 밀담을 요청할 수 없고, 대기 중인 요청도 취소돼요.</p></div><button class="btn" id="openBtn"></button></div>
     </section>
-    <section class="panel"><h2>밀담 1회 시간</h2><p class="muted small">새로 시작되는 밀담부터 적용돼요. 끝나기 1분 전에 알림이 가고, 시간이 다 되면 자동으로 퇴장해요.</p>
-      <div class="seg" id="gDur">${[[30, "30초"], [60, "1분"], [120, "2분"], [180, "3분"], [300, "5분"], [420, "7분"], [600, "10분"]].map(([s, l]) => `<button data-s="${s}">${l}</button>`).join("")}</div></section>
+    <section class="panel"><h2>밀담 1회 시간</h2><p class="muted small">새로 시작되는 밀담부터 적용돼요. GM이 방을 열 때는 그 자리에서 따로 고를 수도 있어요.</p>
+      <div class="seg" id="gDur">${DURS.map(([s, l]) => `<button data-s="${s}">${l}</button>`).join("")}</div></section>
     <section class="panel"><h2>밀담 최대 인원</h2><p class="muted small">한 밀담방에 들어갈 수 있는 최대 인원이에요 (요청한 사람 포함). 진행 중인 방에는 GM이 '인원 추가'로 더 넣을 수 있어요.</p>
       <div class="seg" id="gMax">${[[2, "2명"], [3, "3명"], [4, "4명"], [5, "5명"], [6, "6명"], [8, "8명"], [0, "제한 없음"]].map(([n, l]) => `<button data-m="${n}">${l}</button>`).join("")}</div></section>
-    <section class="panel"><h2>전체 공지</h2><textarea id="nText" maxlength="200" placeholder="예: 10분 뒤 투표를 시작합니다"></textarea>
+    <section class="panel"><h2>전체 공지</h2><p class="muted small">밀담 중인 사람에게도 바로 떠요.</p><textarea id="nText" maxlength="200" placeholder="예: 10분 뒤 투표를 시작합니다"></textarea>
       <button class="btn primary block" id="nSend" style="margin-top:10px">공지 보내기</button></section>
-    <section class="panel"><h2>알림</h2><p class="muted small">폰은 화면을 한 번 눌러야 알림음이 켜져요. 화면이 꺼지면 알림이 오지 않으니 GM 기기는 켜두세요.</p>
+    <section class="panel"><h2>알림</h2><p class="muted small">폰은 화면을 한 번 눌러야 알림음이 켜져요. 밀담 자동 종료는 켜져 있는 기기가 처리하니 GM 기기는 켜두세요.</p>
       <div class="row"><button class="btn grow" id="testSnd">알림음 시험</button><button class="btn grow" id="wake">화면 켜두기</button></div></section>
-    <section class="panel"><h2>게임 끝난 뒤</h2><p class="muted small">방의 모든 대화와 기록을 지워요. 되돌릴 수 없어요.</p><button class="btn danger block" id="del">방 삭제</button></section>`;
-    $("#openBtn").onclick = () => S.set(`${roomPath()}/meta/open`, !R.meta.open);
+    <section class="panel"><h2>게임 끝난 뒤</h2><p class="muted small">복기용으로 모든 밀담 대화·질문·공지·투표를 저장해 두고 방을 지우세요. 지운 방은 되돌릴 수 없어요.</p>
+      <button class="btn block" id="export">기록 내보내기</button><button class="btn danger block" id="del" style="margin-top:8px">방 삭제</button></section>`;
+    $("#openBtn").onclick = () => setOpen(!R.meta.open);
     $("#gDur").onclick = e => { const b = e.target.closest("button"); if (b) S.set(`${roomPath()}/meta/duration`, +b.dataset.s); };
     $("#gMax").onclick = e => { const b = e.target.closest("button"); if (b) S.set(`${roomPath()}/meta/maxMem`, +b.dataset.m); };
     $("#nSend").onclick = async () => { const t = $("#nText").value.trim(); if (!t) return; await S.push(`${roomPath()}/notices`, {text: t, at: S.TS}); $("#nText").value = ""; toast("공지를 보냈어요."); };
     $("#testSnd").onclick = () => { unlockAudio(); chime("alert"); };
-    $("#wake").onclick = async () => { try { await navigator.wakeLock.request("screen"); toast("화면이 꺼지지 않게 했어요."); } catch { toast("이 기기는 화면 켜두기를 지원하지 않아요.", true); } };
-    $("#del").onclick = async () => { if (confirm("방을 삭제할까요? 모든 대화가 사라져요.")) { await S.remove(roomPath()); location.href = "?" + (params.get("demo") ? "demo=1" : ""); } };
+    $("#wake").onclick = () => { if (G.wake) { G.wantWake = false; G.wake.release(); } else wakeOn(); };
+    paintWake();
+    $("#export").onclick = () => saveText(`밀담방_기록_${code}.txt`, exportAll());
+    $("#del").onclick = async () => { if (confirm("방을 삭제할까요? 모든 대화가 사라져요. 기록을 먼저 내보냈는지 확인해 주세요.")) { await S.remove(roomPath()); forgetRoom(code); location.href = "?" + DQ.slice(1); } };
   }
 }
 
-function copy(t, msg) { (navigator.clipboard?.writeText(t) || Promise.reject()).then(() => toast(msg)).catch(() => prompt("복사해서 쓰세요", t)); }
+function openEndAll() {
+  const n = liveChats().length;
+  if (!n) return toast("진행 중인 밀담이 없어요.");
+  openSheet(`<h2>밀담 ${n}개를 모두 끝낼까요?</h2><p class="muted small">모든 사람이 대기실로 돌아가요.</p>
+    <button class="btn primary block" id="eaClose" style="margin-top:8px">모두 끝내고 밀담 시간도 닫기</button>
+    <button class="btn block" id="eaOnly" style="margin-top:8px">모두 끝내기만</button>
+    <button class="btn ghost block" id="eaNo" style="margin-top:8px">취소</button>`);
+  $("#eaClose").onclick = () => { closeSheet(); endAll(true); };
+  $("#eaOnly").onclick = () => { closeSheet(); endAll(false); };
+  $("#eaNo").onclick = closeSheet;
+}
 
 function openGMPick() {
-  G.open = null; G.pick = new Set();
-  openSheet(`<h2>누구를 밀담방에 넣을까요?</h2><p class="muted small">${memTxt()}을 고르세요 (설정 탭에서 바꿔요) · 1회 시간 <b id="gpDur"></b> (설정 탭에서 바꿔요)</p><div id="gPickList"></div>
+  G.open = null; G.pick = new Set(); G.pickDur = R.meta.duration || 180;
+  openSheet(`<h2>누구를 밀담방에 넣을까요?</h2><p class="muted small">1명이면 GM과 1:1 대화, 2명 이상이면 밀담방이에요 (최대 ${maxMem() >= 99 ? "제한 없음" : maxMem() + "명"}).</p>
+    <label class="f">이번 밀담 시간</label><div class="seg" id="gpDurSeg">${DURS.map(([s, l]) => `<button data-s="${s}">${l}</button>`).join("")}</div>
+    <div id="gPickList" style="margin-top:8px"></div>
     <div class="row" style="margin-top:12px"><button class="btn ghost grow" id="gpCancel">취소</button><button class="btn primary grow" id="gpGo" disabled>방 열기</button></div>`);
+  const paintDur = () => [...$("#gpDurSeg").children].forEach(b => b.classList.toggle("on", +b.dataset.s === G.pickDur));
+  paintDur();
+  $("#gpDurSeg").onclick = e => { const b = e.target.closest("button"); if (b) { G.pickDur = +b.dataset.s; paintDur(); } };
   paintGMPick();
   $("#gpCancel").onclick = closeSheet;
   $("#gPickList").onclick = e => {
@@ -815,16 +1244,16 @@ function openGMPick() {
     paintGMPick();
   };
   $("#gpGo").onclick = async () => {
-    if (G.pick.size < 2 || G.pick.size > maxMem()) return;
+    if (!G.pick.size || G.pick.size > maxMem()) return;
     $("#gpGo").disabled = true;
-    const names = [...G.pick].map(nameOf).join(", ");
-    if (await gmStartChat([...G.pick])) { closeSheet(); toast(`${names} 님을 밀담방에 넣었어요.`); }
-    else paintGMPick();
+    const ids = [...G.pick], names = ids.map(x => nameOf(x)).join(", "), gm1 = ids.length === 1;
+    const res = await openChat(ids, {by: "gm", dur: G.pickDur, gm1});
+    if (res.ok) { await sysMsg(res.cid, gm1 ? `GM이 1:1 대화를 열었습니다 · ${durTxt(res.dur)}` : `GM이 밀담방으로 불렀습니다. 문이 닫혔습니다 · 방음 중 · ${durTxt(res.dur)}`); closeSheet(); toast(gm1 ? `${names} 님과 1:1 대화를 열었어요.` : `${names} 님을 밀담방에 넣었어요.`); if (gm1) openGMChat(res.cid); }
+    else { toast(res.why, true); paintGMPick(); }
   };
 }
 function paintGMPick() {
   const box = $("#gPickList"); if (!box || !G.pick) return;
-  $("#gpDur").textContent = durTxt(R.meta.duration || 180);
   const ps = entries(R.players);
   for (const id of [...G.pick]) if (!R.players?.[id] || R.players[id].busy) G.pick.delete(id);
   box.innerHTML = ps.length ? ps.map(([k, p]) => {
@@ -834,23 +1263,25 @@ function paintGMPick() {
       ${busy ? `<span class="chip red">밀담 중</span>` : R.online?.[k] === false ? `<span class="chip">연결 끊김</span>` : ""}</div>`;
   }).join("") : `<p class="muted">아직 들어온 참가자가 없어요.</p>`;
   const n = G.pick.size, go = $("#gpGo");
-  go.disabled = n < 2; go.textContent = n ? `방 열기 (${n}명)` : "방 열기";
+  go.disabled = !n; go.textContent = n === 1 ? "1:1 대화 열기" : n ? `방 열기 (${n}명)` : "방 열기";
 }
 
 async function gmAddToChat(cid, ids) {
   const players = await S.get(`${roomPath()}/players`) || {};
   const bad = ids.filter(x => !players[x] || players[x].busy);
-  if (bad.length) { toast(`${bad.map(nameOf).join(", ")} 님은 지금 넣을 수 없어요 (밀담 중이거나 방을 나감).`, true); return false; }
+  if (bad.length) { toast(`${bad.map(x => nameOf(x)).join(", ")} 님은 지금 넣을 수 없어요 (밀담 중이거나 방을 나감).`, true); return false; }
+  const got = [];
+  for (const x of ids) { if (await claimBusy(x, cid)) got.push(x); else { for (const y of got) await releaseBusy(y, cid); toast(`${nameOf(x)} 님이 방금 다른 밀담에 들어갔어요.`, true); return false; } }
+  const t = now();
   const ok = await S.tx(`${roomPath()}/chats/${cid}`, c => {
     if (!c || c.status !== "live") return undefined;
-    const members = {...c.members}, added = {...(c.added || {})};
-    ids.forEach(x => { members[x] = true; added[x] = true; });
-    return {...c, members, added};
+    const members = {...c.members}, added = {...(c.added || {})}, names = {...(c.names || {})};
+    ids.forEach(x => { members[x] = true; added[x] = t; names[x] = players[x].name; });
+    const nc = {...c, members, added, names}; delete nc.gm1;    // 1:1에 사람을 더하면 보통 밀담이 돼요
+    return nc;
   });
-  if (!ok) { toast("이미 끝난 밀담이에요.", true); return false; }
-  const up = {}; ids.forEach(x => up[`players/${x}/busy`] = cid);
-  await S.update(roomPath(), up);
-  await sysMsg(cid, `GM이 ${ids.map(nameOf).join(", ")} 님을 밀담에 추가했어요.`);
+  if (!ok) { for (const y of got) await releaseBusy(y, cid); toast("이미 끝난 밀담이에요.", true); return false; }
+  await sysMsg(cid, `GM이 ${ids.map(x => nameOf(x)).join(", ")} 님을 밀담에 추가했어요.`);
   return true;
 }
 function paintGMAdd() {
@@ -871,7 +1302,7 @@ function openGMChat(cid, addMode) {
   G.open = cid; G.addPick = new Set();
   openSheet(`<div class="row" style="justify-content:space-between"><div><h2 id="gcTitle"></h2><div class="muted small" id="gcSub"></div></div><button class="btn sm ghost" id="gcClose">닫기</button></div>
     <div id="gcAddBar" class="row" style="margin-top:8px"><button class="btn sm grow" id="gcAddBtn">＋ 인원 추가</button></div>
-    <div id="gcAddBox" hidden><p class="muted small" style="margin:8px 0 0">진행 중인 이 밀담에 넣을 사람을 고르세요. 남은 시간은 그대로예요.</p><div id="gcAddList"></div>
+    <div id="gcAddBox" hidden><p class="muted small" style="margin:8px 0 0">진행 중인 이 밀담에 넣을 사람을 고르세요. 남은 시간은 그대로예요. 추가된 사람은 <b>추가된 뒤의 대화만</b> 볼 수 있어요.</p><div id="gcAddList"></div>
       <div class="row" style="margin-top:8px"><button class="btn ghost grow" id="gcAddCancel">취소</button><button class="btn primary grow" id="gcAddGo" disabled>추가</button></div></div>
     <div id="gcMsgs" class="msgs" style="max-height:55dvh;padding:8px 0"></div>
     <form class="row" id="gcForm" autocomplete="off"><input type="text" id="gcIn" class="grow" maxlength="500" placeholder="GM으로 말하기"><button class="btn primary">보내기</button></form>`);
@@ -886,32 +1317,73 @@ function openGMChat(cid, addMode) {
   $("#gcAddGo").onclick = async () => {
     if (!G.addPick.size) return; $("#gcAddGo").disabled = true;
     const ids = [...G.addPick];
-    if (await gmAddToChat(cid, ids)) { toast(`${ids.map(nameOf).join(", ")} 님을 추가했어요.`); showAdd(false); } else paintGMAdd();
+    if (await gmAddToChat(cid, ids)) { toast(`${ids.map(x => nameOf(x)).join(", ")} 님을 추가했어요.`); showAdd(false); } else paintGMAdd();
   };
   if (addMode) showAdd(true);
-  $("#gcForm").onsubmit = async e => { e.preventDefault(); const t = $("#gcIn").value.trim(); if (!t) return; $("#gcIn").value = ""; await S.push(`${roomPath()}/messages/${cid}`, {from: "GM", text: t, at: S.TS}); };
+  $("#gcForm").onsubmit = async e => { e.preventDefault(); const t = $("#gcIn").value.trim(); if (!t) return; $("#gcIn").value = ""; await say(cid, "GM", t); };
   paintGMChat();
 }
 function paintGMChat() {
   const cid = G.open; if (!cid || !$("#gcMsgs")) return;
   const c = R.chats?.[cid]; if (!c) return;
-  $("#gcTitle").textContent = membersOf(c).map(nameOf).join(" · ");
-  $("#gcSub").textContent = c.status === "live" ? `방음 중 · 남은 시간 ${fmt(c.endAt - now())}` : `끝난 밀담 · ${hhmm(c.startAt)}`;
+  $("#gcTitle").textContent = chatNames(c);
+  $("#gcSub").textContent = c.status === "live" ? `${c.gm1 ? "1:1 대화" : "방음 중"} · 남은 시간 ${fmt(c.endAt - now())}` : `끝난 밀담 · ${hhmm(c.startAt)}`;
   $("#gcForm").style.display = c.status === "live" ? "" : "none";
   if (c.status !== "live") { $("#gcAddBar").hidden = true; $("#gcAddBox").hidden = true; }
   paintGMAdd();
   paintMsgs($("#gcMsgs"), cid, "GM");
 }
 
+/* 밀담 현황: 누가 누구와 몇 번 했는지, 아직 못 한 사람은 누구인지 (편의 7) */
+function statHTML() {
+  const ps = entries(R.players); if (!ps.length) return `<p class="muted small">참가자가 들어오면 보여요.</p>`;
+  const done = entries(R.chats).filter(([, c]) => c.startAt && !c.gm1);
+  const cnt = {}, pair = {};
+  for (const [, c] of done) {
+    const mem = [...new Set([...Object.keys(c.members || {}), ...Object.keys(c.left || {})])];
+    for (const a of mem) { cnt[a] = (cnt[a] || 0) + 1; for (const b of mem) if (a !== b) ((pair[a] ||= {})[b] = (pair[a][b] || 0) + 1); }
+  }
+  return ps.sort((a, b) => (cnt[a[0]] || 0) - (cnt[b[0]] || 0)).map(([k, p]) => {
+    const with_ = entries(pair[k]).sort((a, b) => b[1] - a[1]).map(([o, n]) => `${nameOf(o)} ${n}`).join(" · ");
+    return `<div class="stat"><span><b>${esc(p.name)}</b><br><span class="muted small">${with_ ? esc(with_) : "아직 아무와도 안 했어요"}</span></span><span class="num ${cnt[k] ? "" : "zero"}">${cnt[k] || 0}회</span></div>`;
+  }).join("");
+}
+
+function voteGMHTML(vid, v) {
+  const t = tally(v); const voted = new Set(Object.keys(v.ballots || {}));
+  const not = entries(R.players).filter(([k]) => !voted.has(k)).map(([, p]) => p.name);
+  const st = {open: ["투표 중", "on"], closed: ["마감 · 결과 비공개", ""], revealed: ["결과 공개됨", "idle"]}[v.status] || ["", ""];
+  const btns = v.status === "open" ? `<button class="btn primary grow" data-va="close" data-vid="${vid}">마감하기</button>`
+    : v.status === "closed" ? `<button class="btn grow" data-va="reopen" data-vid="${vid}">다시 열기</button><button class="btn primary grow" data-va="reveal" data-vid="${vid}">득표수만 공개</button>`
+    : `<button class="btn grow" data-va="hide" data-vid="${vid}">공개 거두기</button>`;
+  return `<section class="panel"><div class="row" style="justify-content:space-between"><h2>🗳️ ${esc(v.q)}</h2><span class="tally ${st[1]}"><i></i>${st[0]}</span></div>
+    <p class="muted small">${t.total}명 투표 · 아직 안 한 사람: ${not.length ? not.map(esc).join(", ") : "없음"}</p>
+    <p class="muted small" style="margin:0">아래 결과와 누가 누구를 골랐는지는 GM만 봐요.</p>
+    ${resultHTML(v, true)}
+    <div class="row wrap-row" style="margin-top:10px">${btns}</div>
+    ${v.status === "closed" ? `<button class="btn block" data-va="revealwho" data-vid="${vid}" style="margin-top:8px">누가 누구를 골랐는지까지 공개</button>` : ""}
+    <div class="row" style="margin-top:8px"><button class="btn sm ghost grow" data-va="new">새 투표 만들기</button><button class="btn sm danger" data-va="del" data-vid="${vid}">지우기</button></div></section>`;
+}
+function voteFormHTML() {
+  const cand = roster().length ? roster() : entries(R.players).map(([, p]) => p.name);
+  return `<section class="panel"><h2>투표 열기</h2><p class="muted small">열면 플레이어 폰에 알림이 가고, 각자 몰래 투표해요. 마감한 뒤 GM이 결과를 공개해요.</p>
+    <label class="f" for="vQ">질문</label><input type="text" id="vQ" maxlength="60" value="범인은 누구일까요?">
+    <label class="f" for="vOpts">후보 (한 줄에 하나)</label><textarea id="vOpts" style="min-height:160px">${esc(cand.join("\n"))}</textarea>
+    <div class="row" style="margin-top:10px">${curVote() ? `<button class="btn ghost grow" data-va="cancelnew">취소</button>` : ""}<button class="btn primary grow" data-va="create">투표 열기</button></div></section>`;
+}
+
 function paintGM() {
   const m = R.meta; $("#gTitle").textContent = m.title;
   const live = liveChats();
   const gl = $("#gLive"); gl.className = "tally " + (live.length ? "on" : "idle"); gl.innerHTML = `<i></i>${live.length ? `밀담 ${live.length}개 진행 중` : "조용함"}`;
-  const bR = $("#bRooms"); bR.hidden = !live.length; bR.textContent = live.length;
+  const bR = $("#bRooms"); const pend = pendingReqs().length; bR.hidden = !live.length && !pend; bR.textContent = live.length + pend;
   const qs = entries(R.questions); const unanswered = qs.filter(([, q]) => !q.answer);
   const bQ = $("#bQs"); bQ.hidden = !unanswered.length; bQ.textContent = unanswered.length;
+  const cv = curVote(); const bV = $("#bVote"); bV.hidden = !(cv && cv[1].status === "open"); bV.textContent = cv ? Object.keys(cv[1].ballots || {}).length : "";
   if (G.seenQ === null) G.seenQ = new Set(qs.map(([k]) => k));
   for (const [k, q] of unanswered) if (!G.seenQ.has(k)) { G.seenQ.add(k); chime("alert"); toast(`🔔 ${nameOf(q.from)} 님의 질문: ${q.text}`, true, 6000); if (G.tab !== "qs") flashTitle(true); }
+  const old = m.createdAt && now() - m.createdAt > 86400000;
+  $("#gOld").innerHTML = old ? `<div class="notice small">만든 지 하루가 넘은 방이에요. 게임이 끝났다면 설정 탭에서 기록을 내보낸 뒤 방을 지워 주세요.</div>` : "";
 
   if (G.tab === "invite" && $("#gPlayers")) {
     const ps = entries(R.players); $("#pc").textContent = `${ps.length}명`;
@@ -920,24 +1392,55 @@ function paintGM() {
       <button class="btn sm ghost" data-kick="${k}" aria-label="${esc(p.name)} 내보내기">내보내기</button></li>`).join("") : `<li class="muted">아직 아무도 들어오지 않았어요.</li>`;
   }
   if (G.tab === "rooms" && $("#gLiveList")) {
+    const pr = pendingReqs();
+    $("#gReqs").innerHTML = pr.length ? pr.map(([k, r]) => `<div class="req"><div class="row" style="justify-content:space-between"><span><b>${esc(nameOf(r.from))}</b> → ${Object.keys(r.to || {}).map(x => esc(nameOf(x))).join(", ")}</span><span class="left" data-left="${k}"></span></div>
+      <div class="muted small">${Object.keys(r.to || {}).map(x => `${esc(nameOf(x))}: ${r.accepted?.[x] ? "수락" : "대기"}`).join(" / ")}</div>
+      <div class="row" style="margin-top:8px"><button class="btn sm ghost grow" data-rcancel="${k}">취소</button><button class="btn sm primary grow" data-rstart="${k}">대신 시작</button></div></div>`).join("") : `<p class="muted small">플레이어끼리 보낸 요청이 여기에 보여요. 대신 시작하거나 취소할 수 있어요.</p>`;
     $("#gLiveList").innerHTML = live.length ? live.map(([k, c]) => {
       const rem = c.endAt - now(); const last = sorted(R.messages?.[k]).filter(([, x]) => x.from !== "SYS").at(-1)?.[1];
-      return `<div class="case live"><div class="row" style="justify-content:space-between"><span class="tally on"><i></i>방음 중</span><span class="t num ${rem <= 60000 ? "warn" : ""}" data-clock="${k}">${fmt(rem)}</span></div>
-        <div class="who" style="margin:6px 0">${membersOf(c).map(nameOf).map(esc).join(" · ")}</div>
-        <div class="muted small" style="min-height:20px">${last ? `${esc(nameOf(last.from))}: ${esc(last.text).slice(0, 60)}` : "아직 대화 없음"}</div>
+      const lastTxt = last ? `${last.from === "GM" ? "GM" : (last.n || nameOf(last.from, c))}: ${last.text.length > 60 ? last.text.slice(0, 60) + "…" : last.text}` : "";
+      return `<div class="case live"><div class="row" style="justify-content:space-between"><span class="tally on"><i></i>${c.gm1 ? "1:1 대화" : "방음 중"}</span><span class="t num ${rem <= 60000 ? "warn" : ""}" data-clock="${k}">${fmt(rem)}</span></div>
+        <div class="who" style="margin:6px 0">${esc(chatNames(c))}</div>
+        <div class="muted small" style="min-height:20px">${last ? esc(lastTxt) : "아직 대화 없음"}</div>
         <div class="row" style="margin-top:10px"><button class="btn sm grow" data-view="${k}">듣기 · 말하기</button><button class="btn sm" data-add="${k}" aria-label="인원 추가">＋사람</button><button class="btn sm" data-ext="${k}">+1분</button><button class="btn sm danger" data-stop="${k}">종료</button></div></div>`;
     }).join("") : `<p class="muted">지금은 진행 중인 밀담이 없어요.</p>`;
+    $("#gEndAll").disabled = !live.length;
+    $("#gStatT").textContent = G.statOpen ? "접기" : "펼치기";
+    $("#gStat").innerHTML = G.statOpen ? statHTML() : `<p class="muted small">누가 누구와 몇 번 밀담했는지, 아직 못 한 사람이 누구인지 보여요.</p>`;
     const ended = entries(R.chats).filter(([, c]) => c.status === "ended").sort((a, b) => (b[1].startAt || 0) - (a[1].startAt || 0));
-    $("#gEnded").innerHTML = ended.length ? ended.map(([k, c]) => `<button class="btn block ghost" data-view="${k}" style="margin:6px 0;justify-content:space-between"><span>${membersOf(c).map(nameOf).map(esc).join(" · ")}</span><span class="muted small">${hhmm(c.startAt)}</span></button>`).join("") : `<p class="muted small">끝난 밀담의 대화가 여기에 쌓여요. 게임 후 복기할 때 보여주세요.</p>`;
+    $("#gEnded").innerHTML = ended.length ? ended.map(([k, c]) => `<button class="btn block ghost" data-view="${k}" style="margin:6px 0;justify-content:space-between"><span>${esc(chatNames(c))}</span><span class="muted small">${hhmm(c.startAt)}</span></button>`).join("") : `<p class="muted small">끝난 밀담의 대화가 여기에 쌓여요. 게임 후 복기할 때 보여주세요.</p>`;
   }
   if (G.tab === "qs" && $("#gQs")) {
+    // 질문 목록 내용이 실제로 바뀔 때만 다시 그려요. 다른 방 채팅 때문에 답변 입력창이 새로 만들어지지 않아요 (A1)
     const list = qs.sort((a, b) => (!!a[1].answer - !!b[1].answer) || (b[1].at || 0) - (a[1].at || 0));
-    const open = document.activeElement?.id?.startsWith("ans-") ? document.activeElement.id : null;
-    const keep = {}; document.querySelectorAll("#gQs textarea").forEach(t => keep[t.id] = t.value);
-    $("#gQs").innerHTML = list.length ? list.map(([k, q]) => `<div class="q ${q.answer ? "" : "new"}"><div class="small muted"><b>${esc(nameOf(q.from))}</b> · ${hhmm(q.at)}</div><div style="margin:4px 0 8px">${esc(q.text)}</div>
-      ${q.answer ? `<div><span class="chip gm">답변함</span> ${esc(q.answer)}</div>` : `<textarea id="ans-${k}" maxlength="300" placeholder="답변 적기"></textarea><button class="btn primary block" data-ans="${k}" style="margin-top:8px">답변 보내기</button>`}</div>`).join("") : `<p class="muted">아직 질문이 없어요.</p>`;
-    for (const id in keep) { const t = document.getElementById(id); if (t) t.value = keep[id]; }
-    if (open) document.getElementById(open)?.focus();
+    const html = list.length ? list.map(([k, q]) => {
+      const editing = G.editQ === k;
+      return `<div class="q ${q.answer ? "" : "new"}"><div class="small muted"><b>${esc(nameOf(q.from) === "(나간 사람)" && q.n ? q.n : nameOf(q.from))}</b> · ${hhmm(q.at)}</div><div style="margin:4px 0 8px">${esc(q.text)}</div>
+      ${q.answer && !editing ? `<div><span class="chip gm">답변함${q.editedAt ? " · 고침" : ""}</span> ${esc(q.answer)}</div><button class="btn sm ghost" data-edit="${k}" style="margin-top:6px">답변 고치기·덧붙이기</button>`
+        : `<textarea id="ans-${k}" maxlength="300" placeholder="답변 적기"></textarea>
+           ${editing ? "" : `<div class="qa">${QUICK.map((t, i) => `<button data-qa="${i}" data-k="${k}">${esc(t)}</button>`).join("")}</div>`}
+           <div class="row" style="margin-top:8px">${editing ? `<button class="btn ghost grow" data-editcancel="1">취소</button>` : ""}<button class="btn primary grow" data-ans="${k}">${editing ? "고친 답변 보내기" : "답변 보내기"}</button></div>`}</div>`;
+    }).join("") : `<p class="muted">아직 질문이 없어요.</p>`;
+    const box = $("#gQs");
+    if (box._h !== html) {
+      const active = document.activeElement?.id?.startsWith("ans-") ? document.activeElement.id : null;
+      const keep = {}; box.querySelectorAll("textarea").forEach(t => keep[t.id] = t.value);
+      box._h = html; box.innerHTML = html;
+      for (const id in keep) { const t = document.getElementById(id); if (t) t.value = keep[id]; }
+      if (active) document.getElementById(active)?.focus();
+    }
+  }
+  if (G.tab === "vote" && $("#gVote")) {
+    const vs = votesSorted();
+    const html = (!cv || G.newVote ? voteFormHTML() : "") + (cv && !G.newVote ? voteGMHTML(cv[0], cv[1]) : "");
+    const box = $("#gVote");
+    if (box._h !== html) {
+      const keep = {q: $("#vQ")?.value, o: $("#vOpts")?.value};
+      box._h = html; box.innerHTML = html;
+      if (keep.q !== undefined && $("#vQ")) { $("#vQ").value = keep.q; $("#vOpts").value = keep.o; }
+    }
+    const olds = vs.slice(G.newVote ? 0 : 1);
+    $("#gVoteOld").innerHTML = olds.length ? olds.map(([k, v]) => `<div class="vote"><h3>${esc(v.q)} <span class="muted small">${hhmm(v.at)}</span></h3>${resultHTML(v, true)}<button class="btn sm danger" data-va="del" data-vid="${k}">지우기</button></div>`).join("") : `<p class="muted small">지난 투표 결과가 여기에 남아요.</p>`;
   }
   if (G.tab === "set" && $("#openBtn")) {
     $("#openBtn").textContent = m.open ? "켜짐" : "꺼짐"; $("#openBtn").className = "btn " + (m.open ? "primary" : "");
@@ -947,26 +1450,36 @@ function paintGM() {
   }
   paintGMChat(); paintGMPick();
 }
+let lastRec = 0;
 function tickGM() {
   if (!R) return;
   document.querySelectorAll("[data-clock]").forEach(el => { const c = R.chats?.[el.dataset.clock]; if (!c) return; const rem = c.endAt - now(); el.textContent = fmt(rem); el.classList.toggle("warn", rem <= 60000); });
-  if (G.open) { const c = R.chats?.[G.open]; if (c?.status === "live") $("#gcSub") && ($("#gcSub").textContent = `방음 중 · 남은 시간 ${fmt(c.endAt - now())}`); }
+  document.querySelectorAll("[data-left]").forEach(el => { const r = R.requests?.[el.dataset.left]; if (!r) return; const s = Math.ceil((REQ_MS - (now() - (r.t0 || 0))) / 1000); if (s <= 0 && G.tab === "rooms") { el.closest(".req")?.remove(); } else el.textContent = s + "초"; });
+  if (G.open) { const c = R.chats?.[G.open]; if (c?.status === "live") $("#gcSub") && ($("#gcSub").textContent = `${c.gm1 ? "1:1 대화" : "방음 중"} · 남은 시간 ${fmt(c.endAt - now())}`); }
   watchClocks();
+  if (performance.now() - lastRec > 1000) { lastRec = performance.now(); reconcile(); }
 }
 
 /* ===================== 시작 ===================== */
 (async () => {
-  try { S = DEMO ? demoStore() : await firebaseStore(); }
-  catch (e) { $("#app").innerHTML = `<div class="wrap"><section class="panel"><h2>연결하지 못했어요</h2><p class="muted">Firebase 설정값을 다시 확인해 주세요.</p><pre class="small muted">${esc(e.message)}</pre></section></div>`; return; }
+  try { S = guard(DEMO ? demoStore() : await firebaseStore()); }
+  catch (e) { $("#app").innerHTML = `<div class="wrap"><section class="panel"><h2>연결하지 못했어요</h2><p class="muted">인터넷 연결을 확인한 뒤 새로고침해 주세요. 계속 안 되면 Firebase 설정값을 확인해 주세요.</p><pre class="small muted">${esc(e.message)}</pre></section></div>`; return; }
+  S.connected(setNet);
   if (!code) return viewHome();
+  $("#app").innerHTML = `<div class="wrap"><section class="panel center"><p class="muted">방에 연결하는 중…</p></section></div>`;
   const gmKey = params.get("gm");
-  const meta = await S.get(`${roomPath()}/meta`);
-  if (gmKey && meta && meta.gmKey === gmKey) {
+  let meta = null;
+  try { meta = await S.get(`${roomPath()}/meta`); }
+  catch (e) { $("#app").innerHTML = `<div class="wrap"><section class="panel center"><h2>방 정보를 받지 못했어요</h2><p class="muted">인터넷 연결을 확인한 뒤 새로고침해 주세요.</p><button class="btn" onclick="location.reload()">새로고침</button></section></div>`; return; }
+  if (gmKey && meta && (meta.gmHash ? meta.gmHash === await sha(gmKey) : meta.gmKey === gmKey)) {
+    rememberRoom(code, gmKey, meta.title);
     shellGM();
-    S.on(roomPath(), v => { R = v; if (!R?.meta) { $("#app").innerHTML = `<div class="wrap"><section class="panel center"><h2>방이 삭제됐어요</h2><a class="btn" href="?">처음으로</a></section></div>`; return; } paintGM(); });
+    S.presence(`${roomPath()}/gmOnline`);
+    S.on(roomPath(), v => { R = v; if (!R?.meta) { $("#app").innerHTML = `<div class="wrap"><section class="panel center"><h2>방이 삭제됐어요</h2><a class="btn" href="?${DQ.slice(1)}">처음으로</a></section></div>`; return; } paintGM(); });
     setInterval(tickGM, 500);
     return;
   }
+  if (gmKey && meta) toast("GM 링크가 맞지 않아 플레이어로 들어왔어요.", true, 5000);
   pid = idStore.getItem(`mildam_pid_${code}`);
   if (pid) S.presence(`${roomPath()}/online/${pid}`);
   S.on(roomPath(), v => { R = v; renderPlayer(); });
